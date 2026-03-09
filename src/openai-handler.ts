@@ -27,6 +27,7 @@ import type {
 } from './types.js';
 import { convertToCursorRequest, parseToolCalls } from './converter.js';
 import { sendCursorRequest, sendCursorRequestFull } from './cursor-client.js';
+import { estimateAnthropicInputTokens, estimateOpenAICompletionTokens } from './token-estimator.js';
 import {
     isRefusal,
     sanitizeResponse,
@@ -348,6 +349,9 @@ function handleOpenAIMockStream(res: Response, body: OpenAIChatRequest, mockText
 }
 
 function handleOpenAIMockNonStream(res: Response, body: OpenAIChatRequest, mockText: string): void {
+    const anthropicReq = convertToAnthropicRequest(body);
+    const promptTokens = estimateAnthropicInputTokens(anthropicReq);
+    const completionTokens = estimateOpenAICompletionTokens(mockText);
     res.json({
         id: chatId(),
         object: 'chat.completion',
@@ -358,7 +362,7 @@ function handleOpenAIMockNonStream(res: Response, body: OpenAIChatRequest, mockT
             message: { role: 'assistant', content: mockText },
             finish_reason: 'stop',
         }],
-        usage: { prompt_tokens: 15, completion_tokens: 35, total_tokens: 50 },
+        usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
     });
 }
 
@@ -671,6 +675,9 @@ async function handleOpenAINonStream(
         content = sanitizeResponse(fullText);
     }
 
+    const promptTokens = estimateAnthropicInputTokens(anthropicReq);
+    const completionTokens = estimateOpenAICompletionTokens(content, toolCalls);
+
     const response: OpenAIChatCompletion = {
         id: chatId(),
         object: 'chat.completion',
@@ -686,9 +693,9 @@ async function handleOpenAINonStream(
             finish_reason: finishReason,
         }],
         usage: {
-            prompt_tokens: 100,
-            completion_tokens: Math.ceil(fullText.length / 4),
-            total_tokens: 100 + Math.ceil(fullText.length / 4),
+            prompt_tokens: promptTokens,
+            completion_tokens: completionTokens,
+            total_tokens: promptTokens + completionTokens,
         },
     };
 
