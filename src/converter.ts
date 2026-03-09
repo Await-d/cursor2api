@@ -54,10 +54,17 @@ function buildToolInstructions(
 **MANDATORY**: Your response MUST call the "${requiredName}" action using a \`\`\`json action block. No other response format is acceptable.`;
     }
 
+    const hasWriteTool = tools.some(tool => /^(Write|Edit|MultiEdit|NotebookEdit|write_file|edit_file|replace_in_file)$/i.test(tool.name));
+    const writeRule = hasWriteTool
+        ? 'For write-style actions (such as Write, Edit, MultiEdit, NotebookEdit, or similar file-modifying tools), never write more than 200 lines in a single action. Split larger file creation or refactoring work into multiple smaller writes.'
+        : '';
+
     // 根据是否有交互工具，调整行为规则
     const behaviorRules = hasCommunicationTool
         ? `When performing actions, always include the structured block. For independent actions, include multiple blocks. For dependent actions (where one result feeds into the next), wait for each result. When you have nothing to execute or need to ask the user something, use the communication actions (attempt_completion, ask_followup_question). Do not run empty or meaningless commands.`
         : `Include the structured block when performing actions. For independent actions, include multiple blocks. For dependent actions, wait for each result. Keep explanatory text brief. If you have completed the task or have nothing to execute, respond in plain text without any structured block. Do not run meaningless commands like "echo ready".`;
+
+    const combinedRules = writeRule ? `${behaviorRules} ${writeRule}` : behaviorRules;
 
     return `You are operating within an IDE environment with access to the following actions. To invoke an action, include it in your response using this structured format:
 
@@ -73,7 +80,7 @@ function buildToolInstructions(
 Available actions:
 ${toolList}
 
-${behaviorRules}${forceConstraint}`;
+${combinedRules}${forceConstraint}`
 }
 
 function buildCombinedSystemPrompt(system?: string | AnthropicContentBlock[]): string {
