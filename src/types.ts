@@ -105,6 +105,7 @@ export interface AppConfig {
     proxy?: string;
     cursorModel: string;
     modelMapping: Record<string, string>;
+    systemPromptInject: string;
     vision?: {
         enabled: boolean;
         mode: 'ocr' | 'api';

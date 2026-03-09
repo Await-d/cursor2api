@@ -40,6 +40,7 @@ export function getConfig(): AppConfig {
         timeout: 120,
         cursorModel: 'anthropic/claude-sonnet-4.6',
         modelMapping: {},
+        systemPromptInject: '',
         fingerprint: {
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
         },
@@ -54,6 +55,7 @@ export function getConfig(): AppConfig {
             if (yaml.timeout) config.timeout = yaml.timeout;
             if (yaml.proxy) config.proxy = yaml.proxy;
             if (yaml.cursor_model) config.cursorModel = yaml.cursor_model;
+            if (typeof yaml.system_prompt_inject === 'string') config.systemPromptInject = yaml.system_prompt_inject;
             const yamlModelMapping = parseModelMapping(yaml.model_mapping ?? yaml.model_map);
             if (Object.keys(yamlModelMapping).length > 0) {
                 config.modelMapping = yamlModelMapping;
@@ -80,6 +82,7 @@ export function getConfig(): AppConfig {
     if (process.env.TIMEOUT) config.timeout = parseInt(process.env.TIMEOUT);
     if (process.env.PROXY) config.proxy = process.env.PROXY;
     if (process.env.CURSOR_MODEL) config.cursorModel = process.env.CURSOR_MODEL;
+    if (process.env.SYSTEM_PROMPT_INJECT) config.systemPromptInject = process.env.SYSTEM_PROMPT_INJECT;
     if (process.env.MODEL_MAPPING) {
         try {
             const parsed = JSON.parse(process.env.MODEL_MAPPING);
