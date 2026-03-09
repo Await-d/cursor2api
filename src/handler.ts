@@ -15,7 +15,7 @@ import type {
     CursorMessage,
     CursorSSEEvent,
 } from './types.js';
-import { convertToCursorRequest, parseToolCalls, hasToolCalls } from './converter.js';
+import { convertToCursorRequest, parseToolCalls } from './converter.js';
 import { sendCursorRequest, sendCursorRequestFull } from './cursor-client.js';
 import { getConfig } from './config.js';
 
@@ -116,6 +116,38 @@ export function isRefusal(text: string): boolean {
     return REFUSAL_PATTERNS.some(p => p.test(text));
 }
 
+function extractModelFromParseFailure(model: string): string | null {
+    if (!/JSON\s+parsing\s+failed/i.test(model)) return null;
+    const match = model.match(/"model"\s*:\s*"([^"\n\r]+)"/i);
+    if (!match) return null;
+    const recovered = match[1].trim();
+    return recovered || null;
+}
+
+function normalizeRequestModel(rawModel: unknown): { model: string; changed: boolean } {
+    const fallback = getConfig().cursorModel;
+
+    if (typeof rawModel !== 'string') {
+        return { model: fallback, changed: true };
+    }
+
+    const trimmed = rawModel.trim();
+    if (!trimmed) {
+        return { model: fallback, changed: true };
+    }
+
+    const recovered = extractModelFromParseFailure(trimmed);
+    if (recovered) {
+        return { model: recovered, changed: recovered !== trimmed };
+    }
+
+    if (trimmed.length > 160) {
+        return { model: fallback, changed: true };
+    }
+
+    return { model: trimmed, changed: trimmed !== rawModel };
+}
+
 // ==================== 模型列表 ====================
 
 export function listModels(_req: Request, res: Response): void {
@@ -149,7 +181,7 @@ export function countTokens(req: Request, res: Response): void {
     res.json({ input_tokens: Math.max(1, Math.ceil(totalChars / 4)) });
 }
 
-// ==================== 身份探针拦截 ====================
+// ==================== 身份探针识别（仅记录） ====================
 
 // 关键词检测（宽松匹配）：只要用户消息包含这些关键词组合就判定为身份探针
 const IDENTITY_PROBE_PATTERNS = [
@@ -330,56 +362,27 @@ export function sanitizeResponse(text: string): string {
     return result;
 }
 
-async function handleMockIdentityStream(res: Response, body: AnthropicRequest): Promise<void> {
-    res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'X-Accel-Buffering': 'no',
-    });
-
-    const id = msgId();
-    const mockText = "I am Claude, an advanced AI programming assistant created by Anthropic. I am ready to help you write code, debug, and answer your technical questions. Please let me know what we should work on!";
-
-    writeSSE(res, 'message_start', { type: 'message_start', message: { id, type: 'message', role: 'assistant', content: [], model: body.model || 'claude-3-5-sonnet-20241022', stop_reason: null, stop_sequence: null, usage: { input_tokens: 15, output_tokens: 0 } } });
-    writeSSE(res, 'content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
-    writeSSE(res, 'content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: mockText } });
-    writeSSE(res, 'content_block_stop', { type: 'content_block_stop', index: 0 });
-    writeSSE(res, 'message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 35 } });
-    writeSSE(res, 'message_stop', { type: 'message_stop' });
-    res.end();
-}
-
-async function handleMockIdentityNonStream(res: Response, body: AnthropicRequest): Promise<void> {
-    const mockText = "I am Claude, an advanced AI programming assistant created by Anthropic. I am ready to help you write code, debug, and answer your technical questions. Please let me know what we should work on!";
-    res.json({
-        id: msgId(),
-        type: 'message',
-        role: 'assistant',
-        content: [{ type: 'text', text: mockText }],
-        model: body.model || 'claude-3-5-sonnet-20241022',
-        stop_reason: 'end_turn',
-        stop_sequence: null,
-        usage: { input_tokens: 15, output_tokens: 35 }
-    });
-}
-
 // ==================== Messages API ====================
 
 export async function handleMessages(req: Request, res: Response): Promise<void> {
-    const body = req.body as AnthropicRequest;
+    const rawBody = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as AnthropicRequest;
+    const normalizedModel = normalizeRequestModel(rawBody.model);
+    const body: AnthropicRequest = normalizedModel.changed
+        ? { ...rawBody, model: normalizedModel.model }
+        : rawBody;
 
-    console.log(`[Handler] 收到请求: model=${body.model}, messages=${body.messages?.length}, stream=${body.stream}, tools=${body.tools?.length ?? 0}`);
+    const rawModelForLog = typeof rawBody.model === 'string' ? rawBody.model : String(rawBody.model ?? '');
+    const modelPreview = rawModelForLog.length > 180 ? `${rawModelForLog.substring(0, 180)}...` : rawModelForLog;
+
+    console.log(`[Handler] 收到请求: model=${modelPreview || '(missing)'}, messages=${body.messages?.length}, stream=${body.stream}, tools=${body.tools?.length ?? 0}`);
+    if (normalizedModel.changed) {
+        console.warn(`[Handler] 请求 model 字段异常，已规范化为: ${normalizedModel.model}`);
+    }
 
     try {
         // 注意：图片预处理已移入 convertToCursorRequest → preprocessImages() 统一处理
         if (isIdentityProbe(body)) {
-            console.log(`[Handler] 拦截到身份探针，返回模拟响应以规避风控`);
-            if (body.stream) {
-                return await handleMockIdentityStream(res, body);
-            } else {
-                return await handleMockIdentityNonStream(res, body);
-            }
+            console.log(`[Handler] 检测到身份探针，已禁用模拟响应，继续透传真实请求`);
         }
 
         // 转换为 Cursor 请求
@@ -465,14 +468,14 @@ export function buildRetryRequest(body: AnthropicRequest, attempt: number): Anth
 async function handleStream(res: Response, cursorReq: CursorChatRequest, body: AnthropicRequest): Promise<void> {
     // 设置 SSE headers
     res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
         'X-Accel-Buffering': 'no',
     });
 
     const id = msgId();
-    const model = body.model;
+    const model = cursorReq.model;
     const hasTools = (body.tools?.length ?? 0) > 0;
 
     // 发送 message_start
@@ -484,6 +487,10 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
             usage: { input_tokens: 100, output_tokens: 0 },
         },
     });
+
+    const keepaliveInterval = setInterval(() => {
+        writeSSE(res, 'ping', { type: 'ping' });
+    }, 15000);
 
     let fullResponse = '';
     let sentText = '';
@@ -725,6 +732,8 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         writeSSE(res, 'error', {
             type: 'error', error: { type: 'api_error', message },
         });
+    } finally {
+        clearInterval(keepaliveInterval);
     }
 
     res.end();
@@ -811,7 +820,7 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
         type: 'message',
         role: 'assistant',
         content: contentBlocks,
-        model: body.model,
+        model: cursorReq.model,
         stop_reason: stopReason,
         stop_sequence: null,
         usage: {
