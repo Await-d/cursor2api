@@ -515,7 +515,7 @@ function extractToolResultText(block: AnthropicContentBlock): string {
 
 // ==================== 响应解析 ====================
 
-function tolerantParse(jsonStr: string): any {
+function tolerantParse(jsonStr: string): unknown {
     // 第一次尝试：直接解析
     try {
         return JSON.parse(jsonStr);
@@ -638,6 +638,213 @@ function tolerantParse(jsonStr: string): any {
     }
 }
 
+function extractStringField(jsonStr: string, fieldNames: string[]): string | null {
+    for (const fieldName of fieldNames) {
+        const regex = new RegExp(`"${fieldName}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`);
+        const match = jsonStr.match(regex);
+        if (match?.[1]) {
+            return match[1]
+                .replace(/\\"/g, '"')
+                .replace(/\\n/g, '\n')
+                .replace(/\\r/g, '\r')
+                .replace(/\\t/g, '\t');
+        }
+    }
+
+    return null;
+}
+
+function extractJsonValueSlice(jsonStr: string, startIndex: number): string | null {
+    let index = startIndex;
+    while (index < jsonStr.length && /\s/.test(jsonStr[index])) {
+        index++;
+    }
+
+    if (index >= jsonStr.length) return null;
+
+    const startChar = jsonStr[index];
+    if (startChar === '{' || startChar === '[') {
+        const stack: string[] = [startChar];
+        let inString = false;
+        let escaped = false;
+
+        for (let i = index + 1; i < jsonStr.length; i++) {
+            const char = jsonStr[i];
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                } else if (char === '\\') {
+                    escaped = true;
+                } else if (char === '"') {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (char === '"') {
+                inString = true;
+                continue;
+            }
+
+            if (char === '{' || char === '[') {
+                stack.push(char);
+                continue;
+            }
+
+            if (char === '}' || char === ']') {
+                const expected = char === '}' ? '{' : '[';
+                if (stack[stack.length - 1] === expected) {
+                    stack.pop();
+                    if (stack.length === 0) {
+                        return jsonStr.slice(index, i + 1);
+                    }
+                }
+            }
+        }
+
+        return jsonStr.slice(index);
+    }
+
+    if (startChar === '"') {
+        let escaped = false;
+        for (let i = index + 1; i < jsonStr.length; i++) {
+            const char = jsonStr[i];
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (char === '\\') {
+                escaped = true;
+                continue;
+            }
+            if (char === '"') {
+                return jsonStr.slice(index, i + 1);
+            }
+        }
+        return jsonStr.slice(index);
+    }
+
+    let endIndex = index;
+    while (endIndex < jsonStr.length && !/[\s,}\]]/.test(jsonStr[endIndex])) {
+        endIndex++;
+    }
+
+    return jsonStr.slice(index, endIndex);
+}
+
+function closeUnterminatedJsonValue(jsonStr: string): string {
+    const stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+
+    for (const char of jsonStr) {
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (char === '\\') {
+                escaped = true;
+            } else if (char === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === '"') {
+            inString = true;
+            continue;
+        }
+
+        if (char === '{' || char === '[') {
+            stack.push(char);
+        } else if (char === '}' && stack[stack.length - 1] === '{') {
+            stack.pop();
+        } else if (char === ']' && stack[stack.length - 1] === '[') {
+            stack.pop();
+        }
+    }
+
+    let fixed = jsonStr;
+    if (inString) {
+        fixed += '"';
+    }
+
+    for (let i = stack.length - 1; i >= 0; i--) {
+        fixed += stack[i] === '{' ? '}' : ']';
+    }
+
+    return fixed;
+}
+
+function parseRecoveredArguments(jsonStr: string): Record<string, unknown> {
+    for (const fieldName of ['parameters', 'arguments', 'input']) {
+        const fieldRegex = new RegExp(`"${fieldName}"\\s*:`);
+        const fieldMatch = fieldRegex.exec(jsonStr);
+        if (!fieldMatch) continue;
+
+        const rawValue = extractJsonValueSlice(jsonStr, fieldMatch.index + fieldMatch[0].length);
+        if (!rawValue) continue;
+
+        const candidateValues = [rawValue, closeUnterminatedJsonValue(rawValue)];
+        for (const candidate of candidateValues) {
+            try {
+                const parsed = tolerantParse(candidate);
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                    return parsed as Record<string, unknown>;
+                }
+                if (parsed !== undefined) {
+                    return { value: parsed };
+                }
+            } catch {
+                continue;
+            }
+        }
+    }
+
+    return {};
+}
+
+function recoverToolCall(jsonStr: string): ParsedToolCall | null {
+    const name = extractStringField(jsonStr, ['tool', 'name']);
+    if (!name) return null;
+
+    return {
+        name,
+        arguments: parseRecoveredArguments(jsonStr),
+    };
+}
+
+function parseToolCallBlock(jsonStr: string): ParsedToolCall | null {
+    try {
+        const parsed = tolerantParse(jsonStr) as { tool?: string; name?: string; parameters?: Record<string, unknown>; arguments?: Record<string, unknown>; input?: Record<string, unknown> };
+        if (parsed?.tool || parsed?.name) {
+            return {
+                name: parsed.tool || parsed.name || '',
+                arguments: parsed.parameters || parsed.arguments || parsed.input || {},
+            };
+        }
+    } catch {
+        const recovered = recoverToolCall(jsonStr);
+        if (recovered) {
+            return recovered;
+        }
+        throw new Error('Unable to parse tool call block');
+    }
+
+    return null;
+}
+
+function looksLikeToolCallCandidate(fullBlock: string, jsonStr: string): boolean {
+    if (/^```json\s+action\b/i.test(fullBlock)) {
+        return true;
+    }
+
+    if (/"tool"\s*:/i.test(jsonStr)) {
+        return true;
+    }
+
+    return /"name"\s*:/i.test(jsonStr) && /"(?:parameters|arguments|input)"\s*:/i.test(jsonStr);
+}
+
 export function parseToolCalls(responseText: string): {
     toolCalls: ParsedToolCall[];
     cleanText: string;
@@ -648,18 +855,22 @@ export function parseToolCalls(responseText: string): {
     const fullBlockRegex = /```json(?:\s+action)?\s*([\s\S]*?)\s*```/g;
 
     for (let match = fullBlockRegex.exec(responseText); match !== null; match = fullBlockRegex.exec(responseText)) {
+        if (!looksLikeToolCallCandidate(match[0], match[1])) {
+            continue;
+        }
+
         let isToolCall = false;
         try {
-            const parsed = tolerantParse(match[1]);
-            if (parsed.tool || parsed.name) {
-                const name = parsed.tool || parsed.name;
-                let args = parsed.parameters || parsed.arguments || parsed.input || {};
-                args = fixToolCallArguments(name, args);
-                toolCalls.push({ name, arguments: args });
+
+            const parsed = parseToolCallBlock(match[1]);
+            if (parsed) {
+                toolCalls.push(parsed);
                 isToolCall = true;
             }
         } catch (e) {
-            console.error('[Converter] tolerantParse 失败:', e);
+            const snippet = match[1].replace(/\s+/g, ' ').trim().slice(0, 220);
+            console.warn(`[Converter] 无法恢复工具调用 JSON，已按普通文本处理: ${snippet}`, e);
+
         }
 
         if (isToolCall) {
