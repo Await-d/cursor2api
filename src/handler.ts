@@ -15,9 +15,10 @@ import type {
     CursorMessage,
     CursorSSEEvent,
 } from './types.js';
-import { convertToCursorRequest, parseToolCalls } from './converter.js';
+import { convertToCursorRequest, parseToolCalls, hasToolCalls } from './converter.js';
 import { sendCursorRequest, sendCursorRequestFull } from './cursor-client.js';
 import { getConfig } from './config.js';
+import { estimateAnthropicInputTokens, estimateAnthropicOutputTokens } from './token-estimator.js';
 
 function msgId(): string {
     return 'msg_' + uuidv4().replace(/-/g, '').substring(0, 24);
@@ -169,16 +170,7 @@ export function listModels(_req: Request, res: Response): void {
 
 export function countTokens(req: Request, res: Response): void {
     const body = req.body as AnthropicRequest;
-    let totalChars = 0;
-
-    if (body.system) {
-        totalChars += typeof body.system === 'string' ? body.system.length : JSON.stringify(body.system).length;
-    }
-    for (const msg of body.messages ?? []) {
-        totalChars += typeof msg.content === 'string' ? msg.content.length : JSON.stringify(msg.content).length;
-    }
-
-    res.json({ input_tokens: Math.max(1, Math.ceil(totalChars / 4)) });
+    res.json({ input_tokens: estimateAnthropicInputTokens(body) });
 }
 
 // ==================== 身份探针识别（仅记录） ====================
@@ -477,6 +469,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
     const id = msgId();
     const model = cursorReq.model;
     const hasTools = (body.tools?.length ?? 0) > 0;
+    const estimatedInputTokens = estimateAnthropicInputTokens(body);
 
     // 发送 message_start
     writeSSE(res, 'message_start', {
@@ -484,7 +477,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         message: {
             id, type: 'message', role: 'assistant', content: [],
             model, stop_reason: null, stop_sequence: null,
-            usage: { input_tokens: 100, output_tokens: 0 },
+            usage: { input_tokens: estimatedInputTokens, output_tokens: 0 },
         },
     });
 
@@ -561,15 +554,18 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         }
 
         // 流完成后，处理完整响应
+
         // ★ 截断检测：代码块/XML 未闭合时，返回 max_tokens 让 Claude Code 自动继续
         // 避免用户每次都要手动点击"继续"
         let stopReason = (hasTools && isTruncated(fullResponse)) ? 'max_tokens' : 'end_turn';
         if (stopReason === 'max_tokens') {
             console.log(`[Handler] ⚠️ 检测到截断响应 (${fullResponse.length} chars)，设置 stop_reason=max_tokens`);
         }
+        let estimatedOutputTokens = 1;
 
         if (hasTools) {
             let { toolCalls, cleanText } = parseToolCalls(fullResponse);
+            const usageBlocks: AnthropicContentBlock[] = [];
 
             // ★ tool_choice=any 强制重试：如果模型没有输出任何工具调用块，追加强制消息重试
             const toolChoice = body.tool_choice;
@@ -621,6 +617,8 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
                 const unsentCleanText = cleanText.substring(sentText.length).trim();
 
                 if (unsentCleanText) {
+                    const textToSend = (sentText && !sentText.endsWith('\n') ? '\n' : '') + unsentCleanText;
+                    usageBlocks.push({ type: 'text', text: textToSend });
                     if (!textBlockStarted) {
                         writeSSE(res, 'content_block_start', {
                             type: 'content_block_start', index: blockIndex,
@@ -630,7 +628,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
                     }
                     writeSSE(res, 'content_block_delta', {
                         type: 'content_block_delta', index: blockIndex,
-                        delta: { type: 'text_delta', text: (sentText && !sentText.endsWith('\n') ? '\n' : '') + unsentCleanText }
+                        delta: { type: 'text_delta', text: textToSend }
                     });
                 }
 
@@ -644,6 +642,12 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 
                 for (const tc of toolCalls) {
                     const tcId = toolId();
+                    usageBlocks.push({
+                        type: 'tool_use',
+                        id: tcId,
+                        name: tc.name,
+                        input: tc.arguments,
+                    });
                     writeSSE(res, 'content_block_start', {
                         type: 'content_block_start',
                         index: blockIndex,
@@ -666,6 +670,8 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
                     });
                     blockIndex++;
                 }
+
+                estimatedOutputTokens = estimateAnthropicOutputTokens(usageBlocks);
             } else {
                 // False alarm! The tool triggers were just normal text. 
                 // We must send the remaining unsent fullResponse.
@@ -678,6 +684,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 
                 const unsentText = textToSend.substring(sentText.length);
                 if (unsentText) {
+                    estimatedOutputTokens = estimateAnthropicOutputTokens([{ type: 'text', text: unsentText }]);
                     if (!textBlockStarted) {
                         writeSSE(res, 'content_block_start', {
                             type: 'content_block_start', index: blockIndex,
@@ -696,6 +703,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
             // 最后一道防线：清洗所有 Cursor 身份引用
             const sanitized = sanitizeResponse(fullResponse);
             if (sanitized) {
+                estimatedOutputTokens = estimateAnthropicOutputTokens([{ type: 'text', text: sanitized }]);
                 if (!textBlockStarted) {
                     writeSSE(res, 'content_block_start', {
                         type: 'content_block_start', index: blockIndex,
@@ -722,7 +730,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         writeSSE(res, 'message_delta', {
             type: 'message_delta',
             delta: { stop_reason: stopReason, stop_sequence: null },
-            usage: { output_tokens: Math.ceil(fullResponse.length / 4) },
+            usage: { output_tokens: estimatedOutputTokens },
         });
 
         writeSSE(res, 'message_stop', { type: 'message_stop' });
@@ -744,6 +752,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body: AnthropicRequest): Promise<void> {
     let fullText = await sendCursorRequestFull(cursorReq);
     const hasTools = (body.tools?.length ?? 0) > 0;
+    const estimatedInputTokens = estimateAnthropicInputTokens(body);
 
     console.log(`[Handler] 非流式原始响应 (${fullText.length} chars, tools=${hasTools}): ${fullText.substring(0, 300)}${fullText.length > 300 ? '...' : ''}`);
 
@@ -824,8 +833,8 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
         stop_reason: stopReason,
         stop_sequence: null,
         usage: {
-            input_tokens: 100,
-            output_tokens: Math.ceil(fullText.length / 4),
+            input_tokens: estimatedInputTokens,
+            output_tokens: estimateAnthropicOutputTokens(contentBlocks),
         },
     };
 
