@@ -104,6 +104,7 @@ export interface AppConfig {
     timeout: number;
     proxy?: string;
     cursorModel: string;
+    modelMapping: Record<string, string>;
     vision?: {
         enabled: boolean;
         mode: 'ocr' | 'api';

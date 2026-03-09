@@ -19,7 +19,7 @@ import type {
     CursorMessage,
     ParsedToolCall,
 } from './types.js';
-import { getConfig } from './config.js';
+import { resolveCursorModel } from './config.js';
 import { applyVisionInterceptor } from './vision.js';
 import { fixToolCallArguments } from './tool-fixer.js';
 
@@ -85,13 +85,17 @@ ${behaviorRules}${forceConstraint}`;
  * 不覆盖模型身份，而是顺应它在 IDE 内的角色，让它认为自己在执行 IDE 内部的自动化任务
  */
 export async function convertToCursorRequest(req: AnthropicRequest): Promise<CursorChatRequest> {
-    const config = getConfig();
+    const resolvedModel = resolveCursorModel(req.model);
 
     // ★ 图片预处理：在协议转换之前，检测并处理 Anthropic 格式的 ImageBlockParam
     await preprocessImages(req.messages);
 
     const messages: CursorMessage[] = [];
     const hasTools = req.tools && req.tools.length > 0;
+
+    if (resolvedModel !== req.model) {
+        console.log(`[Converter] 模型映射: ${req.model} -> ${resolvedModel}`);
+    }
 
     // 提取系统提示词
     let combinedSystem = '';
@@ -286,7 +290,7 @@ export async function convertToCursorRequest(req: AnthropicRequest): Promise<Cur
     console.log(`[Converter] 总消息数=${messages.length}, 总字符=${totalChars}`);
 
     return {
-        model: config.cursorModel,
+        model: resolvedModel,
         id: shortId(),
         messages,
         trigger: 'submit-message',
