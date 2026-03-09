@@ -19,7 +19,7 @@ import type {
     CursorMessage,
     ParsedToolCall,
 } from './types.js';
-import { resolveCursorModel } from './config.js';
+import { getConfig, resolveCursorModel } from './config.js';
 import { applyVisionInterceptor } from './vision.js';
 import { fixToolCallArguments } from './tool-fixer.js';
 
@@ -76,6 +76,28 @@ ${toolList}
 ${behaviorRules}${forceConstraint}`;
 }
 
+function buildCombinedSystemPrompt(system?: string | AnthropicContentBlock[]): string {
+    const parts: string[] = [];
+
+    if (typeof system === 'string') {
+        const trimmed = system.trim();
+        if (trimmed) parts.push(trimmed);
+    } else if (Array.isArray(system)) {
+        const textBlocks = system
+            .filter(block => block.type === 'text' && typeof block.text === 'string')
+            .map(block => block.text!.trim())
+            .filter(Boolean);
+        parts.push(...textBlocks);
+    }
+
+    const injectedPrompt = getConfig().systemPromptInject.trim();
+    if (injectedPrompt) {
+        parts.push(injectedPrompt);
+    }
+
+    return parts.join('\n');
+}
+
 // ==================== 请求转换 ====================
 
 /**
@@ -98,13 +120,7 @@ export async function convertToCursorRequest(req: AnthropicRequest): Promise<Cur
     }
 
     // 提取系统提示词
-    let combinedSystem = '';
-    if (req.system) {
-        if (typeof req.system === 'string') combinedSystem = req.system;
-        else if (Array.isArray(req.system)) {
-            combinedSystem = req.system.filter(b => b.type === 'text').map(b => b.text).join('\n');
-        }
-    }
+    const combinedSystem = buildCombinedSystemPrompt(req.system);
 
     if (hasTools) {
         const tools = req.tools!;
@@ -631,8 +647,7 @@ export function parseToolCalls(responseText: string): {
 
     const fullBlockRegex = /```json(?:\s+action)?\s*([\s\S]*?)\s*```/g;
 
-    let match: RegExpExecArray | null;
-    while ((match = fullBlockRegex.exec(responseText)) !== null) {
+    for (let match = fullBlockRegex.exec(responseText); match !== null; match = fullBlockRegex.exec(responseText)) {
         let isToolCall = false;
         try {
             const parsed = tolerantParse(match[1]);
