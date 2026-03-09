@@ -678,7 +678,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
                 let textToSend = fullResponse;
 
                 if (isRefusal(fullResponse)) {
-                    console.log(`[Handler] Supressed complete refusal without tools: ${fullResponse.substring(0, 100)}...`);
+                    console.log(`[Handler] Supressed refusal after tool-enabled response produced no recoverable tool calls: ${fullResponse.substring(0, 100)}...`);
                     textToSend = 'I understand the request. Let me proceed with the appropriate action. Could you clarify what specific task you would like me to perform?';
                 }
 
