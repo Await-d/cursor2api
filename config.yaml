@@ -11,6 +11,7 @@ timeout: 120
 
 # Cursor 使用的模型
 cursor_model: "anthropic/claude-sonnet-4.6"
+system_prompt_inject: ""
 
 # 浏览器指纹配置
 fingerprint:

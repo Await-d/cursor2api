@@ -49,6 +49,7 @@ npm install
 
 编辑 `config.yaml`：
 - `cursor_model` - 使用的模型（默认 `anthropic/claude-sonnet-4.6`）
+- `system_prompt_inject` - 可选，给每个请求统一追加一段系统提示词；如果原请求已有 system，会追加在后面
 - `fingerprint.user_agent` - 浏览器 User-Agent（模拟 Chrome 请求）
 - `vision.enabled` - 开启视觉拦截 (`true` 发送图片前进行降级处理)。
 - `vision.mode` - 视觉模式。推荐 `ocr` (全自动零配置文字提取)。如需真视觉理解改为 `api` 并配置 `baseUrl` 和 `apiKey` 后接入 Gemini/OpenRouter 等。
