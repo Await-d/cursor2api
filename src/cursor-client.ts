@@ -54,18 +54,45 @@ function makeAgent(proxyUrl: string | null): https.Agent | undefined {
     return new HttpsProxyAgent(proxyUrl);
 }
 
+function deriveChromeFingerprintHeaders(ua: string): Record<string, string> {
+    const chromeMatch = ua.match(/Chrome\/(\d+)\./);
+    const chromeVersion = chromeMatch ? chromeMatch[1] : '140';
+
+    const isMac = /Macintosh|Mac OS X/i.test(ua);
+    const isLinux = /Linux/i.test(ua) && !/Android/i.test(ua);
+    const isWindows = /Windows/i.test(ua);
+    const isMobile = /Mobile|Android/i.test(ua);
+    const isArm = /arm|aarch64/i.test(ua);
+
+    const platform = isMac ? 'macOS' : isLinux ? 'Linux' : 'Windows';
+    const arch = isArm ? 'arm' : 'x86';
+    const bitness = isMobile ? '32' : '64';
+    const mobile = isMobile ? '?1' : '?0';
+
+    const notBrandVersion = ((parseInt(chromeVersion) % 3) + 22).toString();
+    const secChUa = `"Chromium";v="${chromeVersion}", "Not=A?Brand";v="${notBrandVersion}", "Google Chrome";v="${chromeVersion}"` ;
+
+    const platformVersion = isWindows ? '19.0.0' : isMac ? '14.5.0' : '6.6.0';
+
+    return {
+        'sec-ch-ua-platform': `"${platform}"`,
+        'sec-ch-ua': secChUa,
+        'sec-ch-ua-bitness': `"${bitness}"`,
+        'sec-ch-ua-mobile': mobile,
+        'sec-ch-ua-arch': `"${arch}"`,
+        'sec-ch-ua-platform-version': `"${platformVersion}"`,
+    };
+}
+
 function getChromeHeaders(): Record<string, string> {
     const config = getConfig();
+    const ua = config.fingerprint.userAgent;
+    const derived = deriveChromeFingerprintHeaders(ua);
     return {
         'Content-Type': 'application/json',
-        'sec-ch-ua-platform': '"Windows"',
         'x-path': '/api/chat',
-        'sec-ch-ua': '"Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"',
         'x-method': 'POST',
-        'sec-ch-ua-bitness': '"64"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-arch': '"x86"',
-        'sec-ch-ua-platform-version': '"19.0.0"',
+        ...derived,
         'origin': 'https://cursor.com',
         'sec-fetch-site': 'same-origin',
         'sec-fetch-mode': 'cors',
@@ -73,7 +100,7 @@ function getChromeHeaders(): Record<string, string> {
         'referer': 'https://cursor.com/',
         'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
         'priority': 'u=1, i',
-        'user-agent': config.fingerprint.userAgent,
+        'user-agent': ua,
         'x-is-human': '',
     };
 }
