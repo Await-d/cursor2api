@@ -488,12 +488,13 @@ export async function resolveToolResponse(cursorReq: CursorChatRequest, initialR
     let parsed = parseToolCalls(fullText);
 
     if (parsed.toolCalls.length === 0) {
+        console.log(`[Handler] 工具调用解析失败，发送协议纠正提示重试...`);
         fullText = await sendCursorRequestFull(buildToolRetryCursorRequest(cursorReq));
         parsed = parseToolCalls(fullText);
     }
 
-    if (parsed.toolCalls.length === 0 && isRefusal(fullText) && body) {
-        console.log(`[Handler] 工具模式两次重试均为拒绝，尝试认知重构重发...`);
+    if (parsed.toolCalls.length === 0 && body) {
+        console.log(`[Handler] 协议纠正后仍无工具调用（${isRefusal(fullText) ? '拒绝响应' : '纯文本'}），尝试认知重构重发...`);
         const reframed = await convertToCursorRequest(buildRetryRequest(body, 0));
         fullText = await sendCursorRequestFull(reframed);
         parsed = parseToolCalls(fullText);
