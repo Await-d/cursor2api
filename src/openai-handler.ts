@@ -371,7 +371,7 @@ async function handleOpenAIStream(
         }, 15000);
 
         try {
-            const resolved = await resolveToolResponse(cursorReq);
+            const resolved = await resolveToolResponse(cursorReq, undefined, anthropicReq);
 
             if (resolved.toolCalls.length > 0) {
                 const cleanOutput = isRefusal(resolved.cleanText)
@@ -569,7 +569,7 @@ async function handleOpenAINonStream(
     anthropicReq: AnthropicRequest,
 ): Promise<void> {
     const hasTools = (body.tools?.length ?? 0) > 0;
-    const resolved = hasTools ? await resolveToolResponse(cursorReq) : null;
+    const resolved = hasTools ? await resolveToolResponse(cursorReq, undefined, anthropicReq) : null;
     let fullText = resolved ? resolved.fullText : await sendCursorRequestFull(cursorReq);
 
     console.log(`[OpenAI] 非流式原始响应 (${fullText.length} chars, tools=${hasTools}): ${fullText.substring(0, 300)}${fullText.length > 300 ? '...' : ''}`);

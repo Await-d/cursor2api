@@ -479,7 +479,7 @@ export function buildToolRetryCursorRequest(cursorReq: CursorChatRequest): Curso
     };
 }
 
-export async function resolveToolResponse(cursorReq: CursorChatRequest, initialResponse?: string): Promise<{
+export async function resolveToolResponse(cursorReq: CursorChatRequest, initialResponse?: string, body?: AnthropicRequest): Promise<{
     fullText: string;
     toolCalls: ParsedToolCall[];
     cleanText: string;
@@ -489,6 +489,13 @@ export async function resolveToolResponse(cursorReq: CursorChatRequest, initialR
 
     if (parsed.toolCalls.length === 0) {
         fullText = await sendCursorRequestFull(buildToolRetryCursorRequest(cursorReq));
+        parsed = parseToolCalls(fullText);
+    }
+
+    if (parsed.toolCalls.length === 0 && isRefusal(fullText) && body) {
+        console.log(`[Handler] 工具模式两次重试均为拒绝，尝试认知重构重发...`);
+        const reframed = await convertToCursorRequest(buildRetryRequest(body, 0));
+        fullText = await sendCursorRequestFull(reframed);
         parsed = parseToolCalls(fullText);
     }
 
@@ -600,7 +607,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         }
 
         if (hasTools) {
-            resolvedToolResponse = await resolveToolResponse(activeCursorReq, fullResponse);
+            resolvedToolResponse = await resolveToolResponse(activeCursorReq, fullResponse, body);
             fullResponse = resolvedToolResponse.fullText;
         }
 
@@ -837,7 +844,7 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
     }
 
     if (hasTools) {
-        const resolved = await resolveToolResponse(cursorReq, fullText);
+        const resolved = await resolveToolResponse(cursorReq, fullText, body);
         fullText = resolved.fullText;
         let { toolCalls, cleanText } = resolved;
 
