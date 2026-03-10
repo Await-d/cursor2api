@@ -43,7 +43,7 @@ function markProxyDead(proxyUrl: string): void {
 function isConnectionError(err: unknown): boolean {
     if (!(err instanceof Error)) return false;
     const msg = err.message;
-    return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|socket hang up/i.test(msg);
+    return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|socket hang up|Proxy connection timed out|proxy connection timed out/i.test(msg);
 }
 
 function makeAgent(proxyUrl: string | null): https.Agent | undefined {
