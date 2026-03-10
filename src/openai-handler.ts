@@ -433,37 +433,27 @@ async function handleOpenAIStream(
                     }
                 }
 
+                const toolFinishTokens = estimateOpenAICompletionTokens(cleanOutput ?? '', resolved.toolCalls.map(tc => ({ function: { name: tc.name, arguments: JSON.stringify(tc.arguments) } })));
                 writeOpenAISSE(res, {
                     id, object: 'chat.completion.chunk', created, model,
-                    choices: [{
-                        index: 0,
-                        delta: {},
-                        finish_reason: 'tool_calls',
-                    }],
+                    choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+                    usage: { prompt_tokens: estimateAnthropicInputTokens(anthropicReq), completion_tokens: toolFinishTokens, total_tokens: estimateAnthropicInputTokens(anthropicReq) + toolFinishTokens },
                 });
             } else {
-                const textToSend = isRefusal(resolved.fullText)
-                    ? 'I understand the request. Let me proceed with the appropriate action. Could you clarify what specific task you would like me to perform?'
-                    : sanitizeResponse(resolved.fullText);
+                const textToSend = sanitizeResponse(resolved.fullText);
 
                 if (textToSend) {
                     writeOpenAISSE(res, {
                         id, object: 'chat.completion.chunk', created, model,
-                        choices: [{
-                            index: 0,
-                            delta: { content: textToSend },
-                            finish_reason: null,
-                        }],
+                        choices: [{ index: 0, delta: { content: textToSend }, finish_reason: null }],
                     });
                 }
 
+                const noToolTokens = estimateOpenAICompletionTokens(textToSend);
                 writeOpenAISSE(res, {
                     id, object: 'chat.completion.chunk', created, model,
-                    choices: [{
-                        index: 0,
-                        delta: {},
-                        finish_reason: 'stop',
-                    }],
+                    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+                    usage: { prompt_tokens: estimateAnthropicInputTokens(anthropicReq), completion_tokens: noToolTokens, total_tokens: estimateAnthropicInputTokens(anthropicReq) + noToolTokens },
                 });
             }
 
@@ -532,14 +522,11 @@ async function handleOpenAIStream(
             });
         }
 
-        // 发送完成 chunk
+        const noToolStreamTokens = estimateOpenAICompletionTokens(sanitized ?? '');
         writeOpenAISSE(res, {
             id, object: 'chat.completion.chunk', created, model,
-            choices: [{
-                index: 0,
-                delta: {},
-                finish_reason: 'stop',
-            }],
+            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+            usage: { prompt_tokens: estimateAnthropicInputTokens(anthropicReq), completion_tokens: noToolStreamTokens, total_tokens: estimateAnthropicInputTokens(anthropicReq) + noToolStreamTokens },
         });
 
         res.write('data: [DONE]\n\n');

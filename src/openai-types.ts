@@ -83,6 +83,7 @@ export interface OpenAIChatCompletionChunk {
     created: number;
     model: string;
     choices: OpenAIStreamChoice[];
+    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }
 
 export interface OpenAIStreamChoice {
