@@ -1,36 +1,59 @@
-/**
- * cursor-client.ts - Cursor API 客户端
- *
- * 职责：
- * 1. 发送请求到 https://cursor.com/api/chat（带 Chrome TLS 指纹模拟 headers）
- * 2. 流式解析 SSE 响应
- * 3. 自动重试（最多 2 次）
- *
- * 注：x-is-human token 验证已被 Cursor 停用，直接发送空字符串即可。
- */
-
-import { ProxyAgent } from 'undici';
+import * as https from 'https';
+import * as http from 'http';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import type { CursorChatRequest, CursorSSEEvent } from './types.js';
 import { getConfig } from './config.js';
 
+const CURSOR_CHAT_API_HOST = 'cursor.com';
+const CURSOR_CHAT_API_PATH = '/api/chat';
+
 let proxyIndex = 0;
+
+/** 记录最近连接失败的代理（ECONNREFUSED 等网络错误），value = 失败时间戳 */
+const deadProxies = new Map<string, number>();
+/** 代理被标记为死亡后的冷却时间（ms），过后重新尝试 */
+const DEAD_PROXY_COOLDOWN = 60_000;
 
 function nextProxyUrl(): string | null {
     const pool = getConfig().proxyPool;
     if (!pool || pool.length === 0) return null;
-    const url = pool[proxyIndex % pool.length];
-    proxyIndex++;
-    return url;
+
+    const now = Date.now();
+    // 尝试找到一个存活的代理，最多检查 pool.length 次
+    for (let i = 0; i < pool.length; i++) {
+        const url = pool[proxyIndex % pool.length];
+        proxyIndex++;
+        const deadAt = deadProxies.get(url);
+        if (!deadAt || now - deadAt > DEAD_PROXY_COOLDOWN) {
+            deadProxies.delete(url);
+            return url;
+        }
+    }
+    // 所有代理都在冷却期内，回退直连
+    console.warn('[Cursor] 所有代理均不可用，回退直连');
+    return null;
 }
 
-function makeDispatcher(proxyUrl: string | null): ProxyAgent | undefined {
+function markProxyDead(proxyUrl: string): void {
+    deadProxies.set(proxyUrl, Date.now());
+    console.warn(`[Cursor] 代理标记为不可用 (${DEAD_PROXY_COOLDOWN / 1000}s 冷却): ${proxyUrl}`);
+}
+
+function isConnectionError(err: unknown): boolean {
+    if (!(err instanceof Error)) return false;
+    const msg = err.message;
+    return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|socket hang up/i.test(msg);
+}
+
+function makeAgent(proxyUrl: string | null): https.Agent | undefined {
     if (!proxyUrl) return undefined;
-    return new ProxyAgent(proxyUrl);
+    if (proxyUrl.startsWith('socks')) {
+        return new SocksProxyAgent(proxyUrl);
+    }
+    return new HttpsProxyAgent(proxyUrl);
 }
 
-const CURSOR_CHAT_API = 'https://cursor.com/api/chat';
-
-// Chrome 浏览器请求头模拟
 function getChromeHeaders(): Record<string, string> {
     const config = getConfig();
     return {
@@ -51,11 +74,9 @@ function getChromeHeaders(): Record<string, string> {
         'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
         'priority': 'u=1, i',
         'user-agent': config.fingerprint.userAgent,
-        'x-is-human': '',  // Cursor 不再校验此字段
+        'x-is-human': '',
     };
 }
-
-// ==================== API 请求 ====================
 
 class RateLimitError extends Error {
     retryAfterMs: number;
@@ -70,132 +91,159 @@ export async function sendCursorRequest(
     onChunk: (event: CursorSSEEvent) => void,
 ): Promise<void> {
     const maxRetries = 3;
+    let lastError: unknown;
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         const proxyUrl = nextProxyUrl();
-        const dispatcher = makeDispatcher(proxyUrl);
+        const agent = makeAgent(proxyUrl);
         try {
-            await sendCursorRequestInner(req, onChunk, dispatcher);
+            await sendCursorRequestInner(req, onChunk, agent, proxyUrl);
             return;
         } catch (err) {
+            lastError = err;
+
             if (err instanceof RateLimitError) {
                 if (attempt >= maxRetries) throw err;
                 const waitMs = err.retryAfterMs || Math.min(5000 * Math.pow(2, attempt - 1), 60000);
-                const nextProxy = getConfig().proxyPool[proxyIndex % Math.max(getConfig().proxyPool.length, 1)];
-                console.warn(`[Cursor] 429 限流 (${attempt}/${maxRetries})，等待 ${waitMs}ms，切换代理: ${nextProxy ?? '直连'}...`);
+                console.warn(`[Cursor] 429 限流 (${attempt}/${maxRetries})，等待 ${waitMs}ms，切换代理...`);
                 await new Promise(r => setTimeout(r, waitMs));
                 continue;
             }
+
+            // 代理连接失败，标记为死亡
+            if (proxyUrl && isConnectionError(err)) {
+                markProxyDead(proxyUrl);
+            }
+
             const msg = err instanceof Error ? err.message : String(err);
             console.error(`[Cursor] 请求失败 (${attempt}/${maxRetries}): ${msg}`);
             if (attempt < maxRetries) {
-                await new Promise(r => setTimeout(r, 2000));
-            } else {
-                throw err;
+                await new Promise(r => setTimeout(r, 1000));
             }
         }
     }
+
+    // 所有重试用尽后，若最后一次用了代理，尝试一次直连兜底
+    const pool = getConfig().proxyPool;
+    if (pool && pool.length > 0) {
+        console.warn('[Cursor] 所有代理重试失败，最终尝试直连...');
+        try {
+            await sendCursorRequestInner(req, onChunk, undefined, null);
+            return;
+        } catch (directErr) {
+            const msg = directErr instanceof Error ? directErr.message : String(directErr);
+            console.error(`[Cursor] 直连也失败: ${msg}`);
+            // 抛出直连的错误（更有参考价值）
+            throw directErr;
+        }
+    }
+
+    throw lastError;
 }
 
 async function sendCursorRequestInner(
     req: CursorChatRequest,
     onChunk: (event: CursorSSEEvent) => void,
-    dispatcher?: ProxyAgent,
+    agent: https.Agent | undefined,
+    proxyUrl: string | null,
 ): Promise<void> {
     const headers = getChromeHeaders();
-
-    console.log(`[Cursor] 发送请求: model=${req.model}, messages=${req.messages.length}`);
-
+    const body = JSON.stringify(req);
     const config = getConfig();
-    const controller = new AbortController();
 
     // ★ 空闲超时（Idle Timeout）：用读取活动检测替换固定总时长超时。
     // 每次收到新数据时重置计时器，只有在指定时间内完全无数据到达时才中断。
     // 这样长输出（如写长文章、大量工具调用）不会因总时长超限被误杀。
-    const IDLE_TIMEOUT_MS = config.timeout * 1000; // 复用 timeout 配置作为空闲超时阈值
-    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const IDLE_TIMEOUT_MS = config.timeout * 1000;
 
-    const resetIdleTimer = () => {
-        if (idleTimer) clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => {
-            console.warn(`[Cursor] 空闲超时（${config.timeout}s 无新数据），中止请求`);
-            controller.abort();
-        }, IDLE_TIMEOUT_MS);
-    };
+    console.log(`[Cursor] 发送请求: model=${req.model}, messages=${req.messages.length}${proxyUrl ? ` [proxy=${proxyUrl}]` : ''}`);
 
-    // 启动初始计时（等待服务器开始响应）
-    resetIdleTimer();
+    return new Promise<void>((resolve, reject) => {
+        let idleTimer: ReturnType<typeof setTimeout> | null = null;
+        const resetIdleTimer = () => {
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+                console.warn(`[Cursor] 空闲超时（${config.timeout}s 无新数据），中止请求`);
+                reject(new Error('Cursor API 空闲超时'));
+            }, IDLE_TIMEOUT_MS);
+        };
+        const clearIdleTimer = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } };
+        resetIdleTimer();
 
-    try {
-        const resp = await fetch(CURSOR_CHAT_API, {
+        const options: https.RequestOptions = {
+            hostname: CURSOR_CHAT_API_HOST,
+            path: CURSOR_CHAT_API_PATH,
             method: 'POST',
-            headers,
-            body: JSON.stringify(req),
-            signal: controller.signal,
-            ...(dispatcher ? { dispatcher } : {}),
+            headers: {
+                ...headers,
+                'Content-Length': Buffer.byteLength(body),
+            },
+            ...(agent ? { agent } : {}),
+        };
+
+        const reqHttp = https.request(options, (res) => {
+            if (res.statusCode === 429) {
+                clearIdleTimer();
+                const retryAfter = res.headers['retry-after'];
+                const waitMs = retryAfter ? parseInt(String(retryAfter)) * 1000 : 0;
+                res.resume();
+                reject(new RateLimitError(waitMs));
+                return;
+            }
+
+            if (!res.statusCode || res.statusCode >= 300) {
+                clearIdleTimer();
+                let errBody = '';
+                res.on('data', (chunk: Buffer) => { errBody += chunk.toString(); });
+                res.on('end', () => reject(new Error(`Cursor API 错误: HTTP ${res.statusCode} - ${errBody}`)));
+                return;
+            }
+
+            let buffer = '';
+            res.on('data', (chunk: Buffer) => {
+                resetIdleTimer();
+                buffer += chunk.toString();
+                const lines = buffer.split('\n');
+                buffer = lines.pop() ?? '';
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const data = line.slice(6).trim();
+                    if (!data) continue;
+                    try {
+                        const event: CursorSSEEvent = JSON.parse(data);
+                        onChunk(event);
+                    } catch { }
+                }
+            });
+
+            res.on('end', () => {
+                clearIdleTimer();
+                if (buffer.startsWith('data: ')) {
+                    const data = buffer.slice(6).trim();
+                    if (data) {
+                        try { onChunk(JSON.parse(data) as CursorSSEEvent); } catch { }
+                    }
+                }
+                resolve();
+            });
+
+            res.on('error', (err) => {
+                clearIdleTimer();
+                reject(err);
+            });
         });
 
-        if (!resp.ok) {
-            if (resp.status === 429) {
-                const retryAfter = resp.headers.get('retry-after');
-                const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : 0;
-                throw new RateLimitError(waitMs);
-            }
-            const body = await resp.text();
-            throw new Error(`Cursor API 错误: HTTP ${resp.status} - ${body}`);
-        }
+        reqHttp.on('error', (err) => {
+            clearIdleTimer();
+            reject(err);
+        });
 
-        if (!resp.body) {
-            throw new Error('Cursor API 响应无 body');
-        }
 
-        // 流式读取 SSE 响应
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            // 每次收到数据就重置空闲计时器
-            resetIdleTimer();
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-
-            for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-                const data = line.slice(6).trim();
-                if (!data) continue;
-
-                try {
-                    const event: CursorSSEEvent = JSON.parse(data);
-                    onChunk(event);
-                } catch {
-                    // 非 JSON 数据，忽略
-                }
-            }
-        }
-
-        // 处理剩余 buffer
-        if (buffer.startsWith('data: ')) {
-            const data = buffer.slice(6).trim();
-            if (data) {
-                try {
-                    const event: CursorSSEEvent = JSON.parse(data);
-                    onChunk(event);
-                } catch { /* ignore */ }
-            }
-        }
-    } finally {
-        if (idleTimer) clearTimeout(idleTimer);
-    }
+        reqHttp.write(body);
+        reqHttp.end();
+    });
 }
 
-/**
- * 发送非流式请求，收集完整响应
- */
 export async function sendCursorRequestFull(req: CursorChatRequest): Promise<string> {
     let fullText = '';
     await sendCursorRequest(req, (event) => {
