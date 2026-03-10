@@ -724,13 +724,10 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 
                 estimatedOutputTokens = estimateAnthropicOutputTokens(usageBlocks);
             } else {
-                // False alarm! The tool triggers were just normal text. 
-                // We must send the remaining unsent fullResponse.
-                let textToSend = fullResponse;
+                let textToSend = sanitizeResponse(fullResponse);
 
                 if (isRefusal(fullResponse)) {
-                    console.log(`[Handler] Supressed refusal after tool-enabled response produced no recoverable tool calls: ${fullResponse.substring(0, 100)}...`);
-                    textToSend = 'I understand the request. Let me proceed with the appropriate action. Could you clarify what specific task you would like me to perform?';
+                    console.log(`[Handler] Refusal detected in tool-enabled response with no tool calls — sanitized and forwarding: ${fullResponse.substring(0, 100)}...`);
                 }
 
                 const unsentText = textToSend.substring(sentText.length);
@@ -865,10 +862,9 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
                 });
             }
         } else {
-            let textToSend = fullText;
+            const textToSend = sanitizeResponse(fullText);
             if (isRefusal(fullText)) {
-                console.log(`[Handler] Supressed pure text refusal (non-stream): ${fullText.substring(0, 100)}...`);
-                textToSend = 'Let me proceed with the task.';
+                console.log(`[Handler] Refusal detected in tool-enabled non-stream response with no tool calls — sanitized and forwarding: ${fullText.substring(0, 100)}...`);
             }
             contentBlocks.push({ type: 'text', text: textToSend });
         }
