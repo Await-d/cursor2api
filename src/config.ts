@@ -41,6 +41,7 @@ export function getConfig(): AppConfig {
         cursorModel: 'anthropic/claude-sonnet-4.6',
         modelMapping: {},
         systemPromptInject: '',
+        proxyPool: [],
         fingerprint: {
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
         },
@@ -65,12 +66,15 @@ export function getConfig(): AppConfig {
             }
             if (yaml.vision) {
                 config.vision = {
-                    enabled: yaml.vision.enabled !== false, // default to true if vision section exists in some way
+                    enabled: yaml.vision.enabled !== false,
                     mode: yaml.vision.mode || 'ocr',
                     baseUrl: yaml.vision.base_url || 'https://api.openai.com/v1/chat/completions',
                     apiKey: yaml.vision.api_key || '',
                     model: yaml.vision.model || 'gpt-4o-mini',
                 };
+            }
+            if (Array.isArray(yaml.proxy_pool)) {
+                config.proxyPool = yaml.proxy_pool.filter((p: unknown) => typeof p === 'string' && (p as string).trim());
             }
         } catch (e) {
             console.warn('[Config] 读取 config.yaml 失败:', e);
@@ -89,6 +93,17 @@ export function getConfig(): AppConfig {
             config.modelMapping = parseModelMapping(parsed);
         } catch (e) {
             console.warn('[Config] 解析 MODEL_MAPPING 环境变量失败:', e);
+        }
+    }
+
+    if (process.env.PROXY_POOL) {
+        try {
+            const parsed = JSON.parse(process.env.PROXY_POOL);
+            if (Array.isArray(parsed)) {
+                config.proxyPool = parsed.filter((p: unknown) => typeof p === 'string' && (p as string).trim());
+            }
+        } catch {
+            config.proxyPool = process.env.PROXY_POOL.split(',').map(s => s.trim()).filter(Boolean);
         }
     }
 

@@ -9,8 +9,24 @@
  * 注：x-is-human token 验证已被 Cursor 停用，直接发送空字符串即可。
  */
 
+import { ProxyAgent } from 'undici';
 import type { CursorChatRequest, CursorSSEEvent } from './types.js';
 import { getConfig } from './config.js';
+
+let proxyIndex = 0;
+
+function nextProxyUrl(): string | null {
+    const pool = getConfig().proxyPool;
+    if (!pool || pool.length === 0) return null;
+    const url = pool[proxyIndex % pool.length];
+    proxyIndex++;
+    return url;
+}
+
+function makeDispatcher(proxyUrl: string | null): ProxyAgent | undefined {
+    if (!proxyUrl) return undefined;
+    return new ProxyAgent(proxyUrl);
+}
 
 const CURSOR_CHAT_API = 'https://cursor.com/api/chat';
 
@@ -55,14 +71,17 @@ export async function sendCursorRequest(
 ): Promise<void> {
     const maxRetries = 3;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        const proxyUrl = nextProxyUrl();
+        const dispatcher = makeDispatcher(proxyUrl);
         try {
-            await sendCursorRequestInner(req, onChunk);
+            await sendCursorRequestInner(req, onChunk, dispatcher);
             return;
         } catch (err) {
             if (err instanceof RateLimitError) {
                 if (attempt >= maxRetries) throw err;
                 const waitMs = err.retryAfterMs || Math.min(5000 * Math.pow(2, attempt - 1), 60000);
-                console.warn(`[Cursor] 429 限流 (${attempt}/${maxRetries})，等待 ${waitMs}ms...`);
+                const nextProxy = getConfig().proxyPool[proxyIndex % Math.max(getConfig().proxyPool.length, 1)];
+                console.warn(`[Cursor] 429 限流 (${attempt}/${maxRetries})，等待 ${waitMs}ms，切换代理: ${nextProxy ?? '直连'}...`);
                 await new Promise(r => setTimeout(r, waitMs));
                 continue;
             }
@@ -80,6 +99,7 @@ export async function sendCursorRequest(
 async function sendCursorRequestInner(
     req: CursorChatRequest,
     onChunk: (event: CursorSSEEvent) => void,
+    dispatcher?: ProxyAgent,
 ): Promise<void> {
     const headers = getChromeHeaders();
 
@@ -111,6 +131,7 @@ async function sendCursorRequestInner(
             headers,
             body: JSON.stringify(req),
             signal: controller.signal,
+            ...(dispatcher ? { dispatcher } : {}),
         });
 
         if (!resp.ok) {

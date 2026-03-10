@@ -103,6 +103,7 @@ export interface AppConfig {
     port: number;
     timeout: number;
     proxy?: string;
+    proxyPool: string[];
     cursorModel: string;
     modelMapping: Record<string, string>;
     systemPromptInject: string;
