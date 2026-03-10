@@ -46,12 +46,17 @@ function isConnectionError(err: unknown): boolean {
     return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|socket hang up|Proxy connection timed out|proxy connection timed out/i.test(msg);
 }
 
+const agentCache = new Map<string, https.Agent>();
+
 function makeAgent(proxyUrl: string | null): https.Agent | undefined {
     if (!proxyUrl) return undefined;
-    if (proxyUrl.startsWith('socks')) {
-        return new SocksProxyAgent(proxyUrl);
-    }
-    return new HttpsProxyAgent(proxyUrl);
+    const cached = agentCache.get(proxyUrl);
+    if (cached) return cached;
+    const agent = proxyUrl.startsWith('socks')
+        ? new SocksProxyAgent(proxyUrl, { keepAlive: true })
+        : new HttpsProxyAgent(proxyUrl, { keepAlive: true });
+    agentCache.set(proxyUrl, agent);
+    return agent;
 }
 
 function deriveChromeFingerprintHeaders(ua: string): Record<string, string> {
