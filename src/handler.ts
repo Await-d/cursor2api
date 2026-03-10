@@ -14,6 +14,7 @@ import type {
     CursorChatRequest,
     CursorMessage,
     CursorSSEEvent,
+    ParsedToolCall,
 } from './types.js';
 import { convertToCursorRequest, parseToolCalls, hasToolCalls } from './converter.js';
 import { sendCursorRequest, sendCursorRequestFull } from './cursor-client.js';
@@ -422,6 +423,8 @@ export function isTruncated(text: string): boolean {
 // ==================== 重试辅助 ====================
 export const MAX_REFUSAL_RETRIES = 2;
 
+const TOOL_PROTOCOL_CORRECTION_PROMPT = 'Protocol correction: your previous response did not follow the action format. For the same task, respond again with valid ```json action blocks only when an action is required. Do not narrate intent classification or reasoning. Do not output support disclaimers or capability disclaimers.';
+
 /**
  * 当检测到拒绝时，用 IDE 上下文重新包装原始请求体并重试
  * 策略：把用户原始问题包裹在一个"编程任务"情景中，绕过身份锁定
@@ -453,6 +456,47 @@ export function buildRetryRequest(body: AnthropicRequest, attempt: number): Anth
     }
 
     return { ...body, messages: newMessages };
+}
+
+function cursorMessageId(): string {
+    return uuidv4().replace(/-/g, '').substring(0, 16);
+}
+
+export function buildToolRetryCursorRequest(cursorReq: CursorChatRequest): CursorChatRequest {
+    return {
+        ...cursorReq,
+        messages: [
+            ...cursorReq.messages,
+            {
+                id: cursorMessageId(),
+                role: 'user',
+                parts: [{
+                    type: 'text',
+                    text: TOOL_PROTOCOL_CORRECTION_PROMPT,
+                }],
+            },
+        ],
+    };
+}
+
+export async function resolveToolResponse(cursorReq: CursorChatRequest, initialResponse?: string): Promise<{
+    fullText: string;
+    toolCalls: ParsedToolCall[];
+    cleanText: string;
+}> {
+    let fullText = initialResponse ?? await sendCursorRequestFull(cursorReq);
+    let parsed = parseToolCalls(fullText);
+
+    if (parsed.toolCalls.length === 0) {
+        fullText = await sendCursorRequestFull(buildToolRetryCursorRequest(cursorReq));
+        parsed = parseToolCalls(fullText);
+    }
+
+    return {
+        fullText,
+        toolCalls: parsed.toolCalls,
+        cleanText: parsed.cleanText,
+    };
 }
 
 // ==================== 流式处理 ====================
@@ -489,6 +533,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
     let sentText = '';
     let blockIndex = 0;
     let textBlockStarted = false;
+    let resolvedToolResponse: { fullText: string; toolCalls: ParsedToolCall[]; cleanText: string } | null = null;
 
     // 无工具模式：先缓冲全部响应再检测拒绝，如果是拒绝则重试
     let activeCursorReq = cursorReq;
@@ -544,6 +589,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
             }
         }
 
+
         // 极短响应重试（可能是连接中断）
         if (hasTools && fullResponse.trim().length < 10 && retryCount < MAX_REFUSAL_RETRIES) {
             retryCount++;
@@ -551,6 +597,11 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
             activeCursorReq = await convertToCursorRequest(body);
             await executeStream();
             console.log(`[Handler] 重试响应 (${fullResponse.length} chars): ${fullResponse.substring(0, 200)}${fullResponse.length > 200 ? '...' : ''}`);
+        }
+
+        if (hasTools) {
+            resolvedToolResponse = await resolveToolResponse(activeCursorReq, fullResponse);
+            fullResponse = resolvedToolResponse.fullText;
         }
 
         // 流完成后，处理完整响应
@@ -564,7 +615,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         let estimatedOutputTokens = 1;
 
         if (hasTools) {
-            let { toolCalls, cleanText } = parseToolCalls(fullResponse);
+            let { toolCalls, cleanText } = resolvedToolResponse!;
             const usageBlocks: AnthropicContentBlock[] = [];
 
             // ★ tool_choice=any 强制重试：如果模型没有输出任何工具调用块，追加强制消息重试
@@ -789,7 +840,9 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
     }
 
     if (hasTools) {
-        let { toolCalls, cleanText } = parseToolCalls(fullText);
+        const resolved = await resolveToolResponse(cursorReq, fullText);
+        fullText = resolved.fullText;
+        let { toolCalls, cleanText } = resolved;
 
         if (toolCalls.length > 0) {
             stopReason = 'tool_use';
