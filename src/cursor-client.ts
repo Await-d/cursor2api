@@ -41,23 +41,34 @@ function getChromeHeaders(): Record<string, string> {
 
 // ==================== API 请求 ====================
 
-/**
- * 发送请求到 Cursor /api/chat 并以流式方式处理响应（带重试）
- */
+class RateLimitError extends Error {
+    retryAfterMs: number;
+    constructor(retryAfterMs: number) {
+        super(`Cursor API 429 限流，等待 ${retryAfterMs}ms 后重试`);
+        this.retryAfterMs = retryAfterMs;
+    }
+}
+
 export async function sendCursorRequest(
     req: CursorChatRequest,
     onChunk: (event: CursorSSEEvent) => void,
 ): Promise<void> {
-    const maxRetries = 2;
+    const maxRetries = 3;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             await sendCursorRequestInner(req, onChunk);
             return;
         } catch (err) {
+            if (err instanceof RateLimitError) {
+                if (attempt >= maxRetries) throw err;
+                const waitMs = err.retryAfterMs || Math.min(5000 * Math.pow(2, attempt - 1), 60000);
+                console.warn(`[Cursor] 429 限流 (${attempt}/${maxRetries})，等待 ${waitMs}ms...`);
+                await new Promise(r => setTimeout(r, waitMs));
+                continue;
+            }
             const msg = err instanceof Error ? err.message : String(err);
             console.error(`[Cursor] 请求失败 (${attempt}/${maxRetries}): ${msg}`);
             if (attempt < maxRetries) {
-                console.log(`[Cursor] 2s 后重试...`);
                 await new Promise(r => setTimeout(r, 2000));
             } else {
                 throw err;
@@ -103,6 +114,11 @@ async function sendCursorRequestInner(
         });
 
         if (!resp.ok) {
+            if (resp.status === 429) {
+                const retryAfter = resp.headers.get('retry-after');
+                const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : 0;
+                throw new RateLimitError(waitMs);
+            }
             const body = await resp.text();
             throw new Error(`Cursor API 错误: HTTP ${resp.status} - ${body}`);
         }
