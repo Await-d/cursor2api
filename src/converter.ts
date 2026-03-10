@@ -80,7 +80,9 @@ function buildToolInstructions(
 Available actions:
 ${toolList}
 
-${combinedRules}${forceConstraint}`
+
+${combinedRules}${forceConstraint}`;
+
 }
 
 function buildCombinedSystemPrompt(system?: string | AnthropicContentBlock[]): string {
@@ -568,6 +570,7 @@ function tolerantParse(jsonStr: string): unknown {
                 fixed += char;
             }
             escaped = false;
+
         }
     }
 
@@ -593,7 +596,35 @@ function tolerantParse(jsonStr: string): unknown {
             try {
                 return JSON.parse(fixed.substring(0, lastBrace + 1));
             } catch { /* ignore */ }
+
         }
+    }
+
+
+    // 如果结束时仍在字符串内（JSON被截断），闭合字符串
+    if (inString) {
+        fixed += '"';
+    }
+
+    // 补全未闭合的括号（从内到外逐级关闭）
+    while (bracketStack.length > 0) {
+        fixed += bracketStack.pop();
+    }
+
+    // 移除尾部多余逗号
+    fixed = fixed.replace(/,\s*([}\]])/g, '$1');
+
+    try {
+        return JSON.parse(fixed);
+    } catch (_e2) {
+        // 第三次尝试：截断到最后一个完整的顶级对象
+        const lastBrace = fixed.lastIndexOf('}');
+        if (lastBrace > 0) {
+            try {
+                return JSON.parse(fixed.substring(0, lastBrace + 1));
+            } catch { /* ignore */ }
+        }
+        // 全部修复手段失败，重新抛出原始错误
 
         // 第四次尝试：正则提取 tool + parameters（处理值中有未转义引号的情况）
         // 适用于模型生成的代码块参数包含未转义双引号
@@ -628,8 +659,7 @@ function tolerantParse(jsonStr: string): unknown {
                         } catch {
                             // 对每个字段单独提取
                             const fieldRegex = /"([^"]+)"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-                            let fm;
-                            while ((fm = fieldRegex.exec(rawParams)) !== null) {
+                            for (let fm = fieldRegex.exec(rawParams); fm !== null; fm = fieldRegex.exec(rawParams)) {
                                 params[fm[1]] = fm[2].replace(/\\n/g, '\n').replace(/\\t/g, '\t');
                             }
                         }
@@ -641,6 +671,7 @@ function tolerantParse(jsonStr: string): unknown {
         } catch { /* ignore */ }
 
         // 全部修复手段失败，重新抛出
+
         throw _e2;
     }
 }

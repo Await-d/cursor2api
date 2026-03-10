@@ -187,14 +187,16 @@ async function sendCursorRequestInner(
 
     return new Promise<void>((resolve, reject) => {
         let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const clearIdle = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } };
         const resetIdleTimer = () => {
-            if (idleTimer) clearTimeout(idleTimer);
+            clearIdle();
             idleTimer = setTimeout(() => {
                 console.warn(`[Cursor] 空闲超时（${config.timeout}s 无新数据），中止请求`);
                 reject(new Error('Cursor API 空闲超时'));
-            }, IDLE_TIMEOUT_MS);
+            }, config.timeout * 1000);
         };
-        const clearIdleTimer = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } };
+
         resetIdleTimer();
 
         const options: https.RequestOptions = {
@@ -210,7 +212,9 @@ async function sendCursorRequestInner(
 
         const reqHttp = https.request(options, (res) => {
             if (res.statusCode === 429) {
-                clearIdleTimer();
+
+                clearIdle();
+
                 const retryAfter = res.headers['retry-after'];
                 const waitMs = retryAfter ? parseInt(String(retryAfter)) * 1000 : 0;
                 res.resume();
@@ -219,7 +223,9 @@ async function sendCursorRequestInner(
             }
 
             if (!res.statusCode || res.statusCode >= 300) {
-                clearIdleTimer();
+
+                clearIdle();
+
                 let errBody = '';
                 res.on('data', (chunk: Buffer) => { errBody += chunk.toString(); });
                 res.on('end', () => reject(new Error(`Cursor API 错误: HTTP ${res.statusCode} - ${errBody}`)));
@@ -244,7 +250,9 @@ async function sendCursorRequestInner(
             });
 
             res.on('end', () => {
-                clearIdleTimer();
+
+                clearIdle();
+
                 if (buffer.startsWith('data: ')) {
                     const data = buffer.slice(6).trim();
                     if (data) {
@@ -255,13 +263,17 @@ async function sendCursorRequestInner(
             });
 
             res.on('error', (err) => {
-                clearIdleTimer();
+
+                clearIdle();
+
                 reject(err);
             });
         });
 
         reqHttp.on('error', (err) => {
-            clearIdleTimer();
+
+            clearIdle();
+
             reject(err);
         });
 
