@@ -13,6 +13,12 @@ timeout: 120
 cursor_model: "anthropic/claude-sonnet-4.6"
 system_prompt_inject: ""
 
+# 并发队列配置（可选）
+# concurrency: 3         # 最大并发请求数
+# queue_timeout: 120000  # 队列等待超时时间（毫秒）
+# retry_delay: 5000      # 429 初始退避时间（毫秒）
+# max_retry_delay: 60000 # 429 退避时间上限（毫秒）
+
 # 浏览器指纹配置
 fingerprint:
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"

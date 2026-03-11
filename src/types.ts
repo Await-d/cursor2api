@@ -110,6 +110,10 @@ export interface AppConfig {
     timeout: number;
     proxy?: string;
     cursorModel: string;
+    concurrency: number;
+    queueTimeout: number;
+    retryDelay: number;
+    maxRetryDelay: number;
     modelMapping: Record<string, string>;
     systemPromptInject: string;
     proxyPool: string[];

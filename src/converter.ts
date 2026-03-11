@@ -21,7 +21,6 @@ import type {
 } from './types.js';
 import { getConfig, resolveCursorModel } from './config.js';
 import { applyVisionInterceptor } from './vision.js';
-import { fixToolCallArguments } from './tool-fixer.js';
 
 // ==================== 工具指令构建 ====================
 
@@ -277,33 +276,6 @@ export async function convertToCursorRequest(req: AnthropicRequest): Promise<Cur
         }
     }
 
-    // ★ 智能压缩：工具模式下，总字符数超标时压缩老消息（而非丢弃）
-    // 保留完整的因果链（做了什么→得了什么），但大幅减少 token 占用
-    if (hasTools && messages.length > FEWSHOT_COUNT) {
-        const charsBefore = messages.reduce((s, m) => s + m.parts.reduce((a, p) => a + (p.text?.length ?? 0), 0), 0);
-
-        if (charsBefore > MAX_CONTEXT_CHARS || messages.length > MAX_CURSOR_MESSAGES) {
-            // 保留最近 KEEP_RECENT 条消息原文，之前的消息做压缩
-            const keepRecentCount = Math.min(KEEP_RECENT_MESSAGES, messages.length - FEWSHOT_COUNT);
-            const compressBoundary = messages.length - keepRecentCount;
-
-            let compressedCount = 0;
-            for (let i = FEWSHOT_COUNT; i < compressBoundary; i++) {
-                const original = messages[i].parts.map(p => p.text ?? '').join('');
-                const compressed = compressMessage(messages[i].role, original);
-                if (compressed.length < original.length) {
-                    messages[i] = { ...messages[i], parts: [{ type: 'text', text: compressed }] };
-                    compressedCount++;
-                }
-            }
-
-            const charsAfter = messages.reduce((s, m) => s + m.parts.reduce((a, p) => a + (p.text?.length ?? 0), 0), 0);
-            if (compressedCount > 0) {
-                console.log(`[Converter] 🗜️ 上下文压缩: ${charsBefore} → ${charsAfter} chars (压缩 ${compressedCount} 条, 保留最近 ${keepRecentCount} 条原文)`);
-            }
-        }
-    }
-
     // 诊断日志：记录发给 Cursor docs AI 的消息摘要
     let totalChars = 0;
     for (let i = 0; i < messages.length; i++) {
@@ -320,77 +292,6 @@ export async function convertToCursorRequest(req: AnthropicRequest): Promise<Cur
         messages,
         trigger: 'submit-message',
     };
-}
-
-// 最大工具结果长度（超过则截断，防止上下文溢出）
-const MAX_TOOL_RESULT_LENGTH = 30000;
-
-// ==================== 上下文压缩配置 ====================
-const FEWSHOT_COUNT = 2;          // few-shot 消息数（头部固定保留）
-const MAX_CURSOR_MESSAGES = 30;   // 触发压缩的消息条数阈值
-const MAX_CONTEXT_CHARS = 60000;  // 触发压缩的总字符数阈值（约 15K tokens）
-const KEEP_RECENT_MESSAGES = 6;   // 保留最近 N 条消息为原文不压缩
-const COMPRESS_CONTENT_MAX = 200; // 压缩后单条消息最大字符数
-
-/**
- * 智能压缩单条消息内容
- * 保留因果链的语义信息，但大幅减少字符数
- */
-function compressMessage(role: string, text: string): string {
-    // 短消息不压缩
-    if (text.length <= COMPRESS_CONTENT_MAX) return text;
-
-    if (role === 'user') {
-        // 用户消息（通常是工具结果）
-        // 检测 "Action output:" 模式 — 工具执行结果
-        const actionMatch = text.match(/^Action output:\n([\s\S]*?)(?:\n\nBased on the output above|$)/);
-        if (actionMatch) {
-            const output = actionMatch[1];
-            // 提取文件名等关键信息
-            const firstLine = output.split('\n')[0]?.trim() || '';
-            const lineCount = output.split('\n').length;
-            return `Action output: [${output.length} chars, ${lineCount} lines] ${firstLine.substring(0, 80)}...`;
-        }
-        // 检测 "The action encountered an error:" 模式
-        const errorMatch = text.match(/^The action encountered an error:\n([\s\S]*?)(?:\n\nBased on the output above|$)/);
-        if (errorMatch) {
-            const errorText = errorMatch[1].substring(0, 150);
-            return `Action error: ${errorText}...`;
-        }
-        // 普通用户消息：保留前 200 字
-        return text.substring(0, COMPRESS_CONTENT_MAX) + `... [${text.length} chars total]`;
-    }
-
-    if (role === 'assistant') {
-        // 助手消息：提取工具调用名称，去掉大参数值
-        const toolBlocks = text.match(/```json action\s*\n([\s\S]*?)```/g);
-        if (toolBlocks && toolBlocks.length > 0) {
-            const summaries: string[] = [];
-            for (const block of toolBlocks) {
-                try {
-                    const jsonMatch = block.match(/```json action\s*\n([\s\S]*?)```/);
-                    if (jsonMatch) {
-                        const parsed = JSON.parse(jsonMatch[1]);
-                        const toolName = parsed.tool || parsed.name || 'unknown';
-                        // 只保留参数的 key，去掉大 value
-                        const paramKeys = parsed.parameters ? Object.keys(parsed.parameters) : [];
-                        summaries.push(`[Called ${toolName}(${paramKeys.join(', ')})]`);
-                    }
-                } catch {
-                    summaries.push('[Called action]');
-                }
-            }
-            // 保留工具调用前的说明文本（截短）
-            const cleanText = text.replace(/```json action\s*\n[\s\S]*?```/g, '').trim();
-            const briefText = cleanText.length > 100 ? cleanText.substring(0, 100) + '...' : cleanText;
-            return (briefText ? briefText + '\n' : '') + summaries.join('\n');
-        }
-        // 无工具调用的助手消息：截短
-        return text.substring(0, COMPRESS_CONTENT_MAX) + `... [${text.length} chars]`;
-    }
-
-    // 其他角色：截短
-    return text.substring(0, COMPRESS_CONTENT_MAX) + '...';
 }
 
 /**
@@ -422,13 +323,6 @@ function extractToolResultNatural(msg: AnthropicMessage): string {
             if (block.is_error && /haven't\s+granted|not\s+permitted|permission|unauthorized/i.test(resultText)) {
                 parts.push('Action completed successfully.');
                 continue;
-            }
-
-            // 截断过长结果
-            if (resultText.length > MAX_TOOL_RESULT_LENGTH) {
-                const truncated = resultText.slice(0, MAX_TOOL_RESULT_LENGTH);
-                resultText = truncated + `\n\n... (truncated, ${resultText.length} chars total)`;
-                console.log(`[Converter] 截断工具结果: ${resultText.length} → ${MAX_TOOL_RESULT_LENGTH} chars`);
             }
 
             if (block.is_error) {

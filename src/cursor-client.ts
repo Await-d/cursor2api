@@ -4,6 +4,7 @@ import { SocksProxyAgent } from 'socks-proxy-agent';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import type { CursorChatRequest, CursorSSEEvent } from './types.js';
 import { getConfig } from './config.js';
+import { getQueue, RequestQueue } from './queue.js';
 
 const CURSOR_CHAT_API_HOST = 'cursor.com';
 const CURSOR_CHAT_API_PATH = '/api/chat';
@@ -122,6 +123,37 @@ export async function sendCursorRequest(
     req: CursorChatRequest,
     onChunk: (event: CursorSSEEvent) => void,
 ): Promise<void> {
+    const queue = getQueue();
+    const config = getConfig();
+    const MAX_429_RETRIES = 4;
+
+    for (let attempt429 = 1; attempt429 <= MAX_429_RETRIES; attempt429++) {
+        try {
+            await queue.enqueue(() => sendCursorRequestWithProxyRetries(req, onChunk));
+            return;
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            const is429 = err instanceof RateLimitError || msg.includes('429') || msg.toLowerCase().includes('rate limit') || msg.toLowerCase().includes('too many');
+
+            if (is429 && attempt429 < MAX_429_RETRIES) {
+                const delay = RequestQueue.computeRetryDelay(attempt429, config.retryDelay, config.maxRetryDelay);
+                console.warn(`[Cursor] 429 限流 (第${attempt429}次)，${delay}ms 后重试... (队列 运行中=${queue.activeCount}, 等待=${queue.pendingCount})`);
+                await new Promise(r => setTimeout(r, delay));
+                continue;
+            }
+
+            if (is429) {
+                console.error(`[Cursor] 429 限流重试 ${MAX_429_RETRIES} 次后仍失败`);
+            }
+            throw err;
+        }
+    }
+}
+
+async function sendCursorRequestWithProxyRetries(
+    req: CursorChatRequest,
+    onChunk: (event: CursorSSEEvent) => void,
+): Promise<void> {
     const maxRetries = 3;
     let lastError: unknown;
 
@@ -135,14 +167,9 @@ export async function sendCursorRequest(
             lastError = err;
 
             if (err instanceof RateLimitError) {
-                if (attempt >= maxRetries) throw err;
-                const waitMs = err.retryAfterMs || Math.min(5000 * Math.pow(2, attempt - 1), 60000);
-                console.warn(`[Cursor] 429 限流 (${attempt}/${maxRetries})，等待 ${waitMs}ms，切换代理...`);
-                await new Promise(r => setTimeout(r, waitMs));
-                continue;
+                throw err;
             }
 
-            // 代理连接失败，标记为死亡
             if (proxyUrl && isConnectionError(err)) {
                 markProxyDead(proxyUrl);
             }
@@ -155,7 +182,6 @@ export async function sendCursorRequest(
         }
     }
 
-    // 所有重试用尽后，若最后一次用了代理，尝试一次直连兜底
     const pool = getConfig().proxyPool;
     if (pool && pool.length > 0) {
         console.warn('[Cursor] 所有代理重试失败，最终尝试直连...');
@@ -165,7 +191,6 @@ export async function sendCursorRequest(
         } catch (directErr) {
             const msg = directErr instanceof Error ? directErr.message : String(directErr);
             console.error(`[Cursor] 直连也失败: ${msg}`);
-            // 抛出直连的错误（更有参考价值）
             throw directErr;
         }
     }

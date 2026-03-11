@@ -9,8 +9,20 @@ import 'dotenv/config';
 import { createRequire } from 'module';
 import express from 'express';
 import { getConfig } from './config.js';
+import { initQueue } from './queue.js';
 import { handleMessages, listModels, countTokens } from './handler.js';
 import { handleOpenAIChatCompletions, handleOpenAIResponses } from './openai-handler.js';
+
+// 统一日志时间戳
+(() => {
+    const ts = () => new Date().toISOString().replace('T', ' ').replace('Z', '');
+    const wrap = (fn: (...a: unknown[]) => void) =>
+        (...args: unknown[]) => fn(`[${ts()}]`, ...args);
+    console.log = wrap(console.log.bind(console));
+    console.info = wrap(console.info.bind(console));
+    console.warn = wrap(console.warn.bind(console));
+    console.error = wrap(console.error.bind(console));
+})();
 
 // 从 package.json 读取版本号，统一来源，避免多处硬编码
 const require = createRequire(import.meta.url);
@@ -19,6 +31,13 @@ const { version: VERSION } = require('../package.json') as { version: string };
 
 const app = express();
 const config = getConfig();
+
+initQueue({
+    concurrency: config.concurrency,
+    queueTimeout: config.queueTimeout,
+    retryDelay: config.retryDelay,
+    maxRetryDelay: config.maxRetryDelay,
+});
 
 // 解析 JSON body（增大限制以支持 base64 图片，单张图片可达 10MB+）
 app.use(express.json({ limit: '50mb' }));

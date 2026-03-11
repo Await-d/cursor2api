@@ -39,6 +39,10 @@ export function getConfig(): AppConfig {
         port: 3010,
         timeout: 120,
         cursorModel: 'anthropic/claude-sonnet-4.6',
+        concurrency: 3,
+        queueTimeout: 120_000,
+        retryDelay: 5_000,
+        maxRetryDelay: 60_000,
         modelMapping: {},
         systemPromptInject: '',
         proxyPool: [],
@@ -56,6 +60,10 @@ export function getConfig(): AppConfig {
             if (yaml.timeout) config.timeout = yaml.timeout;
             if (yaml.proxy) config.proxy = yaml.proxy;
             if (yaml.cursor_model) config.cursorModel = yaml.cursor_model;
+            if (yaml.concurrency) config.concurrency = yaml.concurrency;
+            if (yaml.queue_timeout) config.queueTimeout = yaml.queue_timeout;
+            if (yaml.retry_delay) config.retryDelay = yaml.retry_delay;
+            if (yaml.max_retry_delay) config.maxRetryDelay = yaml.max_retry_delay;
             if (typeof yaml.system_prompt_inject === 'string') config.systemPromptInject = yaml.system_prompt_inject;
             const yamlModelMapping = parseModelMapping(yaml.model_mapping ?? yaml.model_map);
             if (Object.keys(yamlModelMapping).length > 0) {
@@ -86,6 +94,10 @@ export function getConfig(): AppConfig {
     if (process.env.TIMEOUT) config.timeout = parseInt(process.env.TIMEOUT);
     if (process.env.PROXY) config.proxy = process.env.PROXY;
     if (process.env.CURSOR_MODEL) config.cursorModel = process.env.CURSOR_MODEL;
+    if (process.env.CONCURRENCY) config.concurrency = parseInt(process.env.CONCURRENCY);
+    if (process.env.QUEUE_TIMEOUT) config.queueTimeout = parseInt(process.env.QUEUE_TIMEOUT);
+    if (process.env.RETRY_DELAY) config.retryDelay = parseInt(process.env.RETRY_DELAY);
+    if (process.env.MAX_RETRY_DELAY) config.maxRetryDelay = parseInt(process.env.MAX_RETRY_DELAY);
     if (process.env.SYSTEM_PROMPT_INJECT) config.systemPromptInject = process.env.SYSTEM_PROMPT_INJECT;
     if (process.env.MODEL_MAPPING) {
         try {

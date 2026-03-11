@@ -11,8 +11,16 @@ services:
     volumes:
       # 挂载外部配置文件（推荐）——修改后只需 docker compose restart 即可生效
       - ./config.yaml:/app/config.yaml:ro
-    env_file:
-      - .env.docker
+    environment:
+      - NODE_ENV=production
+      - PORT=3010
+      - TIMEOUT=120
+      # - PROXY=http://host.docker.internal:7890
+      # - CURSOR_MODEL=anthropic/claude-sonnet-4.6
+      # - CONCURRENCY=3
+      # - QUEUE_TIMEOUT=120000
+      # - RETRY_DELAY=5000
+      # - MAX_RETRY_DELAY=60000
 
   cursor2api-2:
     build:
@@ -26,5 +34,13 @@ services:
     volumes:
       # 挂载外部配置文件（推荐）——修改后只需 docker compose restart 即可生效
       - ./config.yaml:/app/config.yaml:ro
-    env_file:
-      - .env.docker
+    environment:
+      - NODE_ENV=production
+      - PORT=3010
+      - TIMEOUT=120
+      # - PROXY=http://host.docker.internal:7890
+      # - CURSOR_MODEL=anthropic/claude-sonnet-4.6
+      # - CONCURRENCY=3
+      # - QUEUE_TIMEOUT=120000
+      # - RETRY_DELAY=5000
+      # - MAX_RETRY_DELAY=60000

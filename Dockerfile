@@ -42,5 +42,8 @@ USER cursor
 # 声明对外暴露的端口
 EXPOSE 3010
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://localhost:3010/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"
+
 # 启动服务
 CMD ["npm", "start"]
