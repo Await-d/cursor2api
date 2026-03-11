@@ -54,7 +54,7 @@ function buildToolInstructions(
 
     const hasWriteTool = tools.some(tool => /^(Write|Edit|MultiEdit|NotebookEdit|write_file|edit_file|replace_in_file)$/i.test(tool.name));
     const writeRule = hasWriteTool
-        ? 'For write-style actions (such as Write, Edit, MultiEdit, NotebookEdit, or similar file-modifying tools), never write more than 200 lines in a single action. Split larger file creation or refactoring work into multiple smaller writes.'
+        ? 'For write-style actions (such as Write, Edit, MultiEdit, NotebookEdit, or similar file-modifying tools), keep every single action to **<=200 lines**. If you need to add or replace more than 200 lines, split the work into multiple sequential actions and append/continue in order (e.g., part 1/3, part 2/3). Never attempt to dump an entire large file in one write; chunk it to avoid failures.'
         : '';
 
     // 根据是否有交互工具，调整行为规则
