@@ -1,0 +1,1 @@
+Install: npm install\nDev server: npm run dev\nBuild: npm run build\nStart built app: npm start\nDocker compose: docker compose up -d --build / docker compose logs -f cursor2api / docker compose down\nTypecheck fallback (when npm run restricted): ./node_modules/.bin/tsc -p tsconfig.json --pretty false\nUseful shell: ls, rg, git status, git diff.

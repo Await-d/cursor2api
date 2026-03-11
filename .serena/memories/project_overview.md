@@ -1,0 +1,1 @@
+cursor2api is a Node.js + TypeScript proxy that converts Cursor docs chat API to Anthropic Messages and OpenAI Chat Completions compatible endpoints. Core flow: src/index.ts routes -> src/handler.ts (Anthropic) / src/openai-handler.ts (OpenAI) -> src/converter.ts -> src/cursor-client.ts. Config loads from config.yaml and env in src/config.ts.

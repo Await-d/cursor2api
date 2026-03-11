@@ -90,6 +90,12 @@ export interface CursorPart {
 export interface CursorSSEEvent {
     type: string;
     delta?: string;
+    /** upstream usage chunk (some OpenAI-compatible services) */
+    usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+    };
 }
 
 // ==================== Internal Types ====================
@@ -103,10 +109,10 @@ export interface AppConfig {
     port: number;
     timeout: number;
     proxy?: string;
-    proxyPool: string[];
     cursorModel: string;
     modelMapping: Record<string, string>;
     systemPromptInject: string;
+    proxyPool: string[];
     vision?: {
         enabled: boolean;
         mode: 'ocr' | 'api';

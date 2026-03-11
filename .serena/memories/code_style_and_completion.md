@@ -1,0 +1,1 @@
+TypeScript strict mode (tsconfig strict=true). Keep changes minimal and consistent with existing style. Prefer explicit typing and avoid any/ts-ignore. After code changes run lsp diagnostics for modified TS files and run build/typecheck. No automated tests currently present in repository (no test/spec files).
