@@ -276,14 +276,7 @@ export async function convertToCursorRequest(req: AnthropicRequest): Promise<Cur
         }
     }
 
-    // 诊断日志：记录发给 Cursor docs AI 的消息摘要
-    let totalChars = 0;
-    for (let i = 0; i < messages.length; i++) {
-        const m = messages[i];
-        const textLen = m.parts.reduce((s, p) => s + (p.text?.length ?? 0), 0);
-        totalChars += textLen;
-        console.log(`[Converter]   cursor_msg[${i}] role=${m.role} chars=${textLen}${i < 2 ? ' (few-shot)' : ''}`);
-    }
+    const totalChars = messages.reduce((s, m) => s + m.parts.reduce((ps, p) => ps + (p.text?.length ?? 0), 0), 0);
     console.log(`[Converter] 总消息数=${messages.length}, 总字符=${totalChars}`);
 
     return {
