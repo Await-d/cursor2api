@@ -84,6 +84,9 @@ export function getConfig(): AppConfig {
             if (Array.isArray(yaml.proxy_pool)) {
                 config.proxyPool = yaml.proxy_pool.filter((p: unknown) => typeof p === 'string' && (p as string).trim());
             }
+            if (config.proxy && config.proxyPool.length === 0) {
+                config.proxyPool = [config.proxy];
+            }
         } catch (e) {
             console.warn('[Config] 读取 config.yaml 失败:', e);
         }
@@ -117,6 +120,9 @@ export function getConfig(): AppConfig {
         } catch {
             config.proxyPool = process.env.PROXY_POOL.split(',').map(s => s.trim()).filter(Boolean);
         }
+    }
+    if (config.proxy && config.proxyPool.length === 0) {
+        config.proxyPool = [config.proxy];
     }
 
     // 从 base64 FP 环境变量解析指纹

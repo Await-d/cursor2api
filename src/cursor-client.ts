@@ -47,6 +47,12 @@ function isConnectionError(err: unknown): boolean {
     return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|socket hang up|Proxy connection timed out|proxy connection timed out/i.test(msg);
 }
 
+function isProxyBlockedError(err: unknown): boolean {
+    if (!(err instanceof Error)) return false;
+    const msg = err.message;
+    return /HTTP 403|Vercel Security Checkpoint|Security Checkpoint/i.test(msg);
+}
+
 const agentCache = new Map<string, https.Agent>();
 
 function makeAgent(proxyUrl: string | null): https.Agent | undefined {
@@ -170,7 +176,7 @@ async function sendCursorRequestWithProxyRetries(
                 throw err;
             }
 
-            if (proxyUrl && isConnectionError(err)) {
+            if (proxyUrl && (isConnectionError(err) || isProxyBlockedError(err))) {
                 markProxyDead(proxyUrl);
             }
 
@@ -208,17 +214,14 @@ async function sendCursorRequestInner(
     const body = JSON.stringify(req);
     const config = getConfig();
 
-    // ★ 空闲超时（Idle Timeout）：用读取活动检测替换固定总时长超时。
-    // 每次收到新数据时重置计时器，只有在指定时间内完全无数据到达时才中断。
-    // 这样长输出（如写长文章、大量工具调用）不会因总时长超限被误杀。
-    const IDLE_TIMEOUT_MS = config.timeout * 1000;
-
     console.log(`[Cursor] 发送请求: model=${req.model}, messages=${req.messages.length}${proxyUrl ? ` [proxy=${proxyUrl}]` : ''}`);
 
     return new Promise<void>((resolve, reject) => {
         let idleTimer: ReturnType<typeof setTimeout> | null = null;
+        let connectTimer: ReturnType<typeof setTimeout> | null = null;
 
         const clearIdle = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } };
+        const clearConnect = () => { if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; } };
         const resetIdleTimer = () => {
             clearIdle();
             idleTimer = setTimeout(() => {
@@ -227,7 +230,10 @@ async function sendCursorRequestInner(
             }, config.timeout * 1000);
         };
 
-        resetIdleTimer();
+        connectTimer = setTimeout(() => {
+            console.warn(`[Cursor] 连接超时（${config.timeout * 2}s 未收到响应头），中止请求`);
+            reject(new Error('Cursor API 连接超时'));
+        }, config.timeout * 2 * 1000);
 
         const options: https.RequestOptions = {
             hostname: CURSOR_CHAT_API_HOST,
@@ -241,6 +247,8 @@ async function sendCursorRequestInner(
         };
 
         const reqHttp = https.request(options, (res) => {
+            clearConnect();
+
             if (res.statusCode === 429) {
 
                 clearIdle();
@@ -282,6 +290,7 @@ async function sendCursorRequestInner(
             res.on('end', () => {
 
                 clearIdle();
+                clearConnect();
 
                 if (buffer.startsWith('data: ')) {
                     const data = buffer.slice(6).trim();
@@ -295,6 +304,7 @@ async function sendCursorRequestInner(
             res.on('error', (err) => {
 
                 clearIdle();
+                clearConnect();
 
                 reject(err);
             });
@@ -303,6 +313,7 @@ async function sendCursorRequestInner(
         reqHttp.on('error', (err) => {
 
             clearIdle();
+            clearConnect();
 
             reject(err);
         });

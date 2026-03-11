@@ -15,12 +15,14 @@ services:
       - NODE_ENV=production
       - PORT=3010
       - TIMEOUT=120
-      # - PROXY=http://host.docker.internal:7890
+      - PROXY=
+      - CONCURRENCY=8
       # - CURSOR_MODEL=anthropic/claude-sonnet-4.6
-      # - CONCURRENCY=3
       # - QUEUE_TIMEOUT=120000
       # - RETRY_DELAY=5000
       # - MAX_RETRY_DELAY=60000
+    env_file:
+      - .env.docker
 
   cursor2api-2:
     build:
@@ -38,9 +40,11 @@ services:
       - NODE_ENV=production
       - PORT=3010
       - TIMEOUT=120
-      # - PROXY=http://host.docker.internal:7890
+      - PROXY=
+      - CONCURRENCY=8
       # - CURSOR_MODEL=anthropic/claude-sonnet-4.6
-      # - CONCURRENCY=3
       # - QUEUE_TIMEOUT=120000
       # - RETRY_DELAY=5000
       # - MAX_RETRY_DELAY=60000
+    env_file:
+      - .env.docker
