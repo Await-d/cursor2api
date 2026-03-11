@@ -20,7 +20,6 @@ import type {
     ParsedToolCall,
 } from './types.js';
 import { getConfig, resolveCursorModel } from './config.js';
-import { applyVisionInterceptor } from './vision.js';
 
 // ==================== 工具指令构建 ====================
 
@@ -116,9 +115,6 @@ function buildCombinedSystemPrompt(system?: string | AnthropicContentBlock[]): s
  */
 export async function convertToCursorRequest(req: AnthropicRequest): Promise<CursorChatRequest> {
     const resolvedModel = resolveCursorModel(req.model);
-
-    // ★ 图片预处理：在协议转换之前，检测并处理 Anthropic 格式的 ImageBlockParam
-    await preprocessImages(req.messages);
 
     const messages: CursorMessage[] = [];
     const hasTools = req.tools && req.tools.length > 0;
@@ -828,53 +824,4 @@ export function isToolCallComplete(text: string): boolean {
 
 function shortId(): string {
     return uuidv4().replace(/-/g, '').substring(0, 16);
-}
-
-// ==================== 图片预处理 ====================
-
-/**
- * 在协议转换之前预处理 Anthropic 消息中的图片
- * 
- * 检测 ImageBlockParam 对象并调用 vision 拦截器进行 OCR/API 降级
- * 这确保了无论请求来自 Claude CLI、OpenAI 客户端还是直接 API 调用，
- * 图片都会在发送到 Cursor API 之前被处理
- */
-async function preprocessImages(messages: AnthropicMessage[]): Promise<void> {
-    if (!messages || messages.length === 0) return;
-
-    // 统计图片数量
-    let totalImages = 0;
-    for (const msg of messages) {
-        if (!Array.isArray(msg.content)) continue;
-        for (const block of msg.content) {
-            if (block.type === 'image') totalImages++;
-        }
-    }
-
-    if (totalImages === 0) return;
-
-    console.log(`[Converter] 📸 检测到 ${totalImages} 张图片，启动 vision 预处理...`);
-
-    // 调用 vision 拦截器处理（OCR / 外部 API）
-    try {
-        await applyVisionInterceptor(messages);
-
-        // 验证处理结果：检查是否还有残留的 image block
-        let remainingImages = 0;
-        for (const msg of messages) {
-            if (!Array.isArray(msg.content)) continue;
-            for (const block of msg.content) {
-                if (block.type === 'image') remainingImages++;
-            }
-        }
-
-        if (remainingImages > 0) {
-            console.log(`[Converter] ⚠️ vision 处理后仍有 ${remainingImages} 张图片未被替换（可能 vision.enabled=false 或处理失败）`);
-        } else {
-            console.log(`[Converter] ✅ 全部 ${totalImages} 张图片已成功处理为文本描述`);
-        }
-    } catch (err) {
-        console.error(`[Converter] ❌ vision 预处理失败:`, err);
-        // 失败时不阻塞请求，image block 会被 extractMessageText 的 case 'image' 兜底处理
-    }
 }
