@@ -17,31 +17,27 @@ function tolerantParse(jsonStr) {
     } catch (_e1) { /* pass */ }
 
     let inString = false;
-    let escaped = false;
     let fixed = '';
     const bracketStack = [];
 
     for (let i = 0; i < jsonStr.length; i++) {
         const char = jsonStr[i];
-        if (char === '\\' && !escaped) {
-            escaped = true;
+        if (char === '"') {
+            let backslashCount = 0;
+            for (let j = fixed.length - 1; j >= 0 && fixed[j] === '\\'; j--) backslashCount++;
+            if (backslashCount % 2 === 0) inString = !inString;
             fixed += char;
-        } else if (char === '"' && !escaped) {
-            inString = !inString;
-            fixed += char;
-            escaped = false;
+            continue;
+        }
+        if (inString) {
+            if (char === '\n') fixed += '\\n';
+            else if (char === '\r') fixed += '\\r';
+            else if (char === '\t') fixed += '\\t';
+            else fixed += char;
         } else {
-            if (inString) {
-                if (char === '\n') fixed += '\\n';
-                else if (char === '\r') fixed += '\\r';
-                else if (char === '\t') fixed += '\\t';
-                else fixed += char;
-            } else {
-                if (char === '{' || char === '[') bracketStack.push(char === '{' ? '}' : ']');
-                else if (char === '}' || char === ']') { if (bracketStack.length > 0) bracketStack.pop(); }
-                fixed += char;
-            }
-            escaped = false;
+            if (char === '{' || char === '[') bracketStack.push(char === '{' ? '}' : ']');
+            else if (char === '}' || char === ']') { if (bracketStack.length > 0) bracketStack.pop(); }
+            fixed += char;
         }
     }
 
@@ -56,6 +52,88 @@ function tolerantParse(jsonStr) {
         if (lastBrace > 0) {
             try { return JSON.parse(fixed.substring(0, lastBrace + 1)); } catch { /* ignore */ }
         }
+        try {
+            const toolMatch = jsonStr.match(/"(?:tool|name)"\s*:\s*"([^"]+)"/);
+            if (toolMatch) {
+                const toolName = toolMatch[1];
+                const paramsMatch = jsonStr.match(/"(?:parameters|arguments|input)"\s*:\s*(\{[\s\S]*)/);
+                let params = {};
+                if (paramsMatch) {
+                    const paramsStr = paramsMatch[1];
+                    let depth = 0;
+                    let end = -1;
+                    let pInString = false;
+                    for (let i = 0; i < paramsStr.length; i++) {
+                        const c = paramsStr[i];
+                        if (c === '"') {
+                            let backslashCount = 0;
+                            for (let j = i - 1; j >= 0 && paramsStr[j] === '\\'; j--) backslashCount++;
+                            if (backslashCount % 2 === 0) pInString = !pInString;
+                        }
+                        if (!pInString) {
+                            if (c === '{') depth++;
+                            if (c === '}') { depth--; if (depth === 0) { end = i; break; } }
+                        }
+                    }
+                    if (end > 0) {
+                        const rawParams = paramsStr.substring(0, end + 1);
+                        try {
+                            params = JSON.parse(rawParams);
+                        } catch {
+                            const fieldRegex = /"([^"]+)"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+                            for (let fm = fieldRegex.exec(rawParams); fm !== null; fm = fieldRegex.exec(rawParams)) {
+                                params[fm[1]] = fm[2].replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+                            }
+                        }
+                    }
+                }
+                return { tool: toolName, parameters: params };
+            }
+        } catch { /* ignore */ }
+
+        try {
+            const toolMatch2 = jsonStr.match(/["'](?:tool|name)["']\s*:\s*["']([^"']+)["']/);
+            if (toolMatch2) {
+                const toolName = toolMatch2[1];
+                const params = {};
+                const bigValueFields = ['content', 'command', 'text', 'new_string', 'new_str', 'file_text', 'code'];
+                const smallFieldRegex = /"(file_path|path|file|old_string|old_str|insert_line|mode|encoding|description|language|name)"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+                for (let sfm = smallFieldRegex.exec(jsonStr); sfm !== null; sfm = smallFieldRegex.exec(jsonStr)) {
+                    params[sfm[1]] = sfm[2]
+                        .replace(/\\n/g, '\n')
+                        .replace(/\\t/g, '\t')
+                        .replace(/\\r/g, '\r')
+                        .replace(/\\\\/g, '\\');
+                }
+                for (const field of bigValueFields) {
+                    const fieldStart = jsonStr.indexOf(`"${field}"`);
+                    if (fieldStart === -1) continue;
+                    const colonPos = jsonStr.indexOf(':', fieldStart + field.length + 2);
+                    if (colonPos === -1) continue;
+                    const valueStart = jsonStr.indexOf('"', colonPos);
+                    if (valueStart === -1) continue;
+                    let valueEnd = jsonStr.length - 1;
+                    while (valueEnd > valueStart && /[}\]\s,]/.test(jsonStr[valueEnd])) valueEnd--;
+                    if (jsonStr[valueEnd] === '"' && valueEnd > valueStart + 1) {
+                        const rawValue = jsonStr.substring(valueStart + 1, valueEnd);
+                        try {
+                            params[field] = JSON.parse(`"${rawValue}"`);
+                        } catch {
+                            params[field] = rawValue
+                                .replace(/\\n/g, '\n')
+                                .replace(/\\t/g, '\t')
+                                .replace(/\\r/g, '\r')
+                                .replace(/\\\\/g, '\\')
+                                .replace(/\\"/g, '"');
+                        }
+                    }
+                }
+                if (Object.keys(params).length > 0) {
+                    return { tool: toolName, parameters: params };
+                }
+            }
+        } catch { /* ignore */ }
+
         throw _e2;
     }
 }
@@ -65,25 +143,175 @@ function parseToolCalls(responseText) {
     const toolCalls = [];
     let cleanText = responseText;
 
-    const fullBlockRegex = /```json(?:\s+action)?\s*([\s\S]*?)\s*```/g;
-    let match;
-    while ((match = fullBlockRegex.exec(responseText)) !== null) {
+    function looksLikeToolCallCandidate(fullBlock, jsonStr) {
+        if (/^```json\s+action\b/i.test(fullBlock)) return true;
+        if (/json\s+action/i.test(fullBlock)) return true;
+        if (/"tool"\s*:/i.test(jsonStr)) return true;
+        return /"name"\s*:/i.test(jsonStr) && /"(?:parameters|arguments|input)"\s*:/i.test(jsonStr);
+    }
+
+    function normalizeCandidateJson(jsonStr) {
+        const normalizedLines = jsonStr
+            .split('\n')
+            .map(line => line.replace(/^\s*(?:>\s*)?(?:(?:[-*]|\d+[.)]|•)\s*)?(?=[{\[}\]"])/, ''))
+            .join('\n');
+
+        return normalizedLines
+            .replace(/^`+\s*/, '')
+            .replace(/\s*`+$/, '')
+            .trim();
+    }
+
+    function expandCandidateStartToLinePrefix(text, objectStart) {
+        let lineStart = objectStart;
+        while (lineStart > 0 && text[lineStart - 1] !== '\n') {
+            lineStart--;
+        }
+
+        const prefix = text.slice(lineStart, objectStart);
+        if (/^\s*(?:>\s*)?(?:(?:[-*]|\d+[.)]|•)\s*)?$/.test(prefix)) {
+            return lineStart;
+        }
+
+        return objectStart;
+    }
+
+    function collectInlineObjectCandidates(text) {
+        const candidates = [];
+        let inString = false;
+        let escaped = false;
+        let depth = 0;
+        let objectStart = -1;
+
+        for (let i = 0; i < text.length; i++) {
+            const char = text[i];
+
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                } else if (char === '\\') {
+                    escaped = true;
+                } else if (char === '"') {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (char === '"') {
+                inString = true;
+                continue;
+            }
+
+            if (char === '{') {
+                if (depth === 0) objectStart = i;
+                depth++;
+                continue;
+            }
+
+            if (char === '}' && depth > 0) {
+                depth--;
+                if (depth === 0 && objectStart >= 0) {
+                    const fullStart = expandCandidateStartToLinePrefix(text, objectStart);
+                    const full = text.slice(fullStart, i + 1);
+                    candidates.push({ full, json: full, start: fullStart, end: i + 1 });
+                    objectStart = -1;
+                }
+            }
+        }
+
+        if (depth > 0 && objectStart >= 0) {
+            const fullStart = expandCandidateStartToLinePrefix(text, objectStart);
+            const full = text.slice(fullStart);
+            candidates.push({ full, json: full, start: fullStart, end: text.length });
+        }
+
+        return candidates;
+    }
+
+    function collectUnterminatedFenceCandidates(text) {
+        const candidates = [];
+        const openFenceRegex = /```json(?:\s+action)?\s*/gi;
+
+        for (let match = openFenceRegex.exec(text); match !== null; match = openFenceRegex.exec(text)) {
+            const start = match.index ?? 0;
+            const contentStart = start + match[0].length;
+            if (text.slice(contentStart).includes('```')) continue;
+
+            candidates.push({
+                full: text.slice(start),
+                json: text.slice(contentStart),
+                start,
+                end: text.length,
+            });
+        }
+
+        return candidates;
+    }
+
+    function parseToolCallBlock(jsonStr) {
+        const parsed = tolerantParse(jsonStr);
+        if (parsed && (parsed.tool || parsed.name)) {
+            return {
+                name: parsed.tool || parsed.name || '',
+                arguments: parsed.parameters || parsed.arguments || parsed.input || {},
+            };
+        }
+        return null;
+    }
+
+    const candidates = [];
+    const fencedRegex = /```json(?:\s+action)?\s*([\s\S]*?)\s*```/gi;
+    for (let match = fencedRegex.exec(responseText); match !== null; match = fencedRegex.exec(responseText)) {
+        const start = match.index ?? 0;
+        candidates.push({ full: match[0], json: match[1], start, end: start + match[0].length });
+    }
+    for (const candidate of collectUnterminatedFenceCandidates(responseText)) {
+        candidates.push(candidate);
+    }
+    const inlineJsonActionRegex = /json\s+action\s*({[\s\S]*?})(?=$|\n\s*\n)/gi;
+    for (let match = inlineJsonActionRegex.exec(responseText); match !== null; match = inlineJsonActionRegex.exec(responseText)) {
+        const start = match.index ?? 0;
+        candidates.push({ full: match[0], json: match[1], start, end: start + match[0].length });
+    }
+    for (const candidate of collectInlineObjectCandidates(responseText)) {
+        candidates.push(candidate);
+    }
+
+    candidates.sort((a, b) => a.start - b.start || b.end - a.end);
+    const filtered = [];
+    for (const candidate of candidates) {
+        const covered = filtered.some(prev => candidate.start >= prev.start && candidate.end <= prev.end);
+        if (covered) continue;
+        filtered.push(candidate);
+    }
+
+    for (const candidate of filtered) {
+        const normalizedJson = normalizeCandidateJson(candidate.json);
+        if (!looksLikeToolCallCandidate(candidate.full, normalizedJson)) continue;
         let isToolCall = false;
         try {
-            const parsed = tolerantParse(match[1]);
-            if (parsed.tool || parsed.name) {
-                toolCalls.push({
-                    name: parsed.tool || parsed.name,
-                    arguments: parsed.parameters || parsed.arguments || parsed.input || {}
-                });
+            const parsed = parseToolCallBlock(normalizedJson);
+            if (parsed) {
+                toolCalls.push(parsed);
                 isToolCall = true;
             }
         } catch (e) {
             console.error(`  ⚠  tolerantParse 失败:`, e.message);
         }
-        if (isToolCall) cleanText = cleanText.replace(match[0], '');
+        if (isToolCall) cleanText = cleanText.replace(candidate.full, '');
     }
+
     return { toolCalls, cleanText: cleanText.trim() };
+}
+
+function hasToolCalls(text) {
+    if (/```json/i.test(text)
+        || /json\s+action/i.test(text)
+        || (/("tool"|"name")\s*:\s*"/i.test(text) && /"(?:parameters|arguments|input)"\s*:/i.test(text))) {
+        return true;
+    }
+
+    return parseToolCalls(text).toolCalls.length > 0;
 }
 
 // ─── 测试框架（极简）────────────────────────────────────────────────────────
@@ -294,6 +522,64 @@ test('代码块内容被流中断（block 完整但 JSON 截断）', () => {
     assertEqual(toolCalls.length, 1);
     assertEqual(toolCalls[0].name, 'Write');
     console.log(`    → 解析出的 content 前30字符: "${String(toolCalls[0].arguments.content).substring(0, 30)}..."`);
+});
+
+test('普通代码块标签也能识别工具对象', () => {
+    const text = `\`\`\`tool
+{"tool":"Read","parameters":{"file_path":"src/index.ts"}}
+\`\`\``;
+    const { toolCalls } = parseToolCalls(text);
+    assertEqual(toolCalls.length, 1);
+    assertEqual(toolCalls[0].name, 'Read');
+});
+
+test('编号列表中的工具对象可识别', () => {
+    const text = `1. {"tool":"Read","parameters":{"file_path":"src/index.ts"}}`;
+    const { toolCalls, cleanText } = parseToolCalls(text);
+    assertEqual(toolCalls.length, 1);
+    assertEqual(toolCalls[0].name, 'Read');
+    assertEqual(cleanText, '');
+});
+
+test('引用块中的多行工具对象可识别', () => {
+    const text = `> {
+>   "tool": "Read",
+>   "parameters": {
+>     "file_path": "src/handler.ts"
+>   }
+> }`;
+    const { toolCalls } = parseToolCalls(text);
+    assertEqual(toolCalls.length, 1);
+    assertEqual(toolCalls[0].arguments.file_path, 'src/handler.ts');
+});
+
+test('同一段 prose 中多个 inline 工具对象可分离', () => {
+    const text = `First {"tool":"Read","parameters":{"file_path":"a.ts"}} then {"tool":"Bash","parameters":{"command":"ls"}}`;
+    const { toolCalls, cleanText } = parseToolCalls(text);
+    assertEqual(toolCalls.length, 2);
+    assertEqual(toolCalls[0].name, 'Read');
+    assertEqual(toolCalls[1].name, 'Bash');
+    assert(cleanText.includes('First'), '普通说明文本应保留');
+});
+
+test('未闭合的 inline 工具对象也会触发恢复', () => {
+    const text = `Use this {"tool":"Write","parameters":{"file_path":"a.ts","content":"hello`;
+    const { toolCalls } = parseToolCalls(text);
+    assertEqual(toolCalls.length, 1);
+    assertEqual(toolCalls[0].name, 'Write');
+});
+
+test('超长 inline 工具对象不依赖正则长度限制', () => {
+    const longContent = 'A'.repeat(9000);
+    const text = `Result: {"tool":"Write","parameters":{"file_path":"big.md","content":"${longContent}"}}`;
+    const { toolCalls } = parseToolCalls(text);
+    assertEqual(toolCalls.length, 1);
+    assertEqual(toolCalls[0].name, 'Write');
+});
+
+test('hasToolCalls 与增强后的 inline 识别保持一致', () => {
+    const text = `1. {"tool":"Read","parameters":{"file_path":"src/index.ts"}}`;
+    assertEqual(hasToolCalls(text), true);
 });
 
 // ════════════════════════════════════════════════════════════════════

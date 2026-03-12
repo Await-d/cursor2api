@@ -1,5 +1,42 @@
 #!/bin/bash
-set -e
+set -euo pipefail
+
+MODE="${1:-pm2}"
+
+if [[ "$MODE" == "docker" || "$MODE" == "--docker" ]]; then
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "[环境检测] 未找到 docker，请先安装 Docker Engine / Docker Desktop。"
+        exit 1
+    fi
+
+    if docker compose version >/dev/null 2>&1; then
+        COMPOSE_CMD=(docker compose)
+    elif command -v docker-compose >/dev/null 2>&1; then
+        COMPOSE_CMD=(docker-compose)
+    else
+        echo "[环境检测] 未找到 docker compose / docker-compose。"
+        exit 1
+    fi
+
+    echo "=========================================="
+    echo "    Cursor2API Docker 部署"
+    echo "=========================================="
+    echo "正在校验 Compose 配置并重建容器..."
+
+    "${COMPOSE_CMD[@]}" config >/dev/null
+    "${COMPOSE_CMD[@]}" up -d --build --force-recreate --remove-orphans
+
+    echo ""
+    echo "当前服务状态："
+    "${COMPOSE_CMD[@]}" ps
+    echo ""
+    echo "常用 Docker 管理命令："
+    echo "▶ 查看日志：        ${COMPOSE_CMD[*]} logs -f --tail=200"
+    echo "▶ 重新部署代码：    ${COMPOSE_CMD[*]} up -d --build --force-recreate"
+    echo "▶ 仅重启读取配置：  ${COMPOSE_CMD[*]} restart"
+    echo "=========================================="
+    exit 0
+fi
 
 echo "=========================================="
 echo "    Cursor2API Linux 一键部署服务包"

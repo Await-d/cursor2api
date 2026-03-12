@@ -7,6 +7,10 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d",
+    "docker:deploy": "docker compose up -d --build --force-recreate --remove-orphans",
+    "docker:logs": "docker compose logs -f --tail=200",
     "test:unit": "node test/unit-tolerant-parse.mjs",
 
     "test:tool-fixer": "node test/unit-tool-fixer.mjs",

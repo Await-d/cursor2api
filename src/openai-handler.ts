@@ -46,6 +46,15 @@ function toolCallId(): string {
     return 'call_' + uuidv4().replace(/-/g, '').substring(0, 24);
 }
 
+function isLikelyRefusal(text: string): boolean {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    if (trimmed.length < 500) {
+        return isRefusal(trimmed);
+    }
+    return isRefusal(trimmed.substring(0, 300));
+}
+
 function createAbortSignal(req: Request, res: Response): AbortSignal {
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -390,7 +399,7 @@ async function handleOpenAIStream(
 
         // 拒绝检测 + 自动重试（工具模式和非工具模式均生效）
         const shouldRetryRefusal = () => {
-            if (!isRefusal(fullResponse)) return false;
+            if (!isLikelyRefusal(fullResponse)) return false;
             if (hasTools && hasToolCalls(fullResponse)) return false;
             return true;
         };
@@ -596,7 +605,7 @@ async function handleOpenAINonStream(
     console.log(`[OpenAI] 非流式原始响应 (${fullText.length} chars, tools=${hasTools}): ${fullText.substring(0, 300)}${fullText.length > 300 ? '...' : ''}`);
 
     // 拒绝检测 + 自动重试（工具模式和非工具模式均生效）
-    const shouldRetry = () => isRefusal(fullText) && !(hasTools && hasToolCalls(fullText));
+    const shouldRetry = () => isLikelyRefusal(fullText) && !(hasTools && hasToolCalls(fullText));
 
     if (shouldRetry()) {
         for (let attempt = 0; attempt < MAX_REFUSAL_RETRIES; attempt++) {

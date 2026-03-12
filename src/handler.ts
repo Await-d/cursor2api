@@ -132,6 +132,15 @@ export function isRefusal(text: string): boolean {
     return REFUSAL_PATTERNS.some(p => p.test(text));
 }
 
+function isLikelyRefusal(text: string): boolean {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    if (trimmed.length < 500) {
+        return isRefusal(trimmed);
+    }
+    return isRefusal(trimmed.substring(0, 300));
+}
+
 function extractModelFromParseFailure(model: string): string | null {
     if (!/JSON\s+parsing\s+failed/i.test(model)) return null;
     const match = model.match(/"model"\s*:\s*"([^"\n\r]+)"/i);
@@ -567,7 +576,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 
         // 拒绝检测 + 自动重试（工具模式和非工具模式均生效）
         const shouldRetryRefusal = () => {
-            if (!isRefusal(fullResponse)) return false;
+            if (!isLikelyRefusal(fullResponse)) return false;
             if (hasTools && hasToolCalls(fullResponse)) return false;
             return true;
         };
@@ -813,7 +822,7 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
     console.log(`[Handler] 非流式原始响应 (${fullText.length} chars, tools=${hasTools}): ${fullText.substring(0, 300)}${fullText.length > 300 ? '...' : ''}`);
 
     // 拒绝检测 + 自动重试（工具模式和非工具模式均生效）
-    const shouldRetry = () => isRefusal(fullText) && !(hasTools && hasToolCalls(fullText));
+    const shouldRetry = () => isLikelyRefusal(fullText) && !(hasTools && hasToolCalls(fullText));
 
     if (shouldRetry()) {
         for (let attempt = 0; attempt < MAX_REFUSAL_RETRIES; attempt++) {

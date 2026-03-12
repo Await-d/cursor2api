@@ -77,6 +77,31 @@ OPENAI_BASE_URL=http://localhost:3010/v1
 
 > ⚠️ **注意**：Cursor IDE 请优先选用 Claude 模型名（通过 `/v1/models` 查看），避免使用 GPT 模型名以获得最佳兼容。
 
+### 6. Docker 部署
+
+```bash
+docker compose up -d --build
+```
+
+代码更新后，请使用下面的命令重新构建并重建容器，确保最新的 `src/` 变更进入镜像并生成新的 `dist/`：
+
+```bash
+docker compose up -d --build --force-recreate --remove-orphans
+```
+
+仓库内也提供了等价的快捷方式：
+
+```bash
+npm run docker:deploy
+# 或
+./deploy.sh --docker
+```
+
+说明：
+- `docker compose restart` 只适合重新读取挂载进容器的 `config.yaml`
+- 修改了 `src/`、`package.json`、`package-lock.json`、`tsconfig.json` 后，必须重新 build + recreate
+- `.env.docker` 变更会影响容器环境变量，应执行 `docker compose up -d --force-recreate`
+
 ## 项目结构
 
 ```
