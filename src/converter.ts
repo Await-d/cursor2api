@@ -759,6 +759,10 @@ function looksLikeToolCallCandidate(fullBlock: string, jsonStr: string): boolean
         return true;
     }
 
+    if (/json\s+action/i.test(fullBlock)) {
+        return true;
+    }
+
     if (/"tool"\s*:/i.test(jsonStr)) {
         return true;
     }
@@ -773,29 +777,43 @@ export function parseToolCalls(responseText: string): {
     const toolCalls: ParsedToolCall[] = [];
     let cleanText = responseText;
 
-    const fullBlockRegex = /```json(?:\s+action)?\s*([\s\S]*?)\s*```/g;
+    type Candidate = { full: string; json: string };
+    const candidates: Candidate[] = [];
 
-    for (let match = fullBlockRegex.exec(responseText); match !== null; match = fullBlockRegex.exec(responseText)) {
-        if (!looksLikeToolCallCandidate(match[0], match[1])) {
+    const fencedRegex = /```json(?:\s+action)?\s*([\s\S]*?)\s*```/gi;
+    for (let match = fencedRegex.exec(responseText); match !== null; match = fencedRegex.exec(responseText)) {
+        candidates.push({ full: match[0], json: match[1] });
+    }
+
+    const inlineJsonActionRegex = /json\s+action\s*({[\s\S]*?})(?=$|\n\s*\n)/gi;
+    for (let match = inlineJsonActionRegex.exec(responseText); match !== null; match = inlineJsonActionRegex.exec(responseText)) {
+        candidates.push({ full: match[0], json: match[1] });
+    }
+
+    const inlineObjectRegex = /({[\s\S]{0,4000}?"(?:tool|name)"\s*:\s*"[^"]+"[\s\S]{0,2000}?"(?:parameters|arguments|input)"\s*:\s*{[\s\S]*?}})/gi;
+    for (let match = inlineObjectRegex.exec(responseText); match !== null; match = inlineObjectRegex.exec(responseText)) {
+        candidates.push({ full: match[1], json: match[1] });
+    }
+
+    for (const candidate of candidates) {
+        if (!looksLikeToolCallCandidate(candidate.full, candidate.json)) {
             continue;
         }
 
         let isToolCall = false;
         try {
-
-            const parsed = parseToolCallBlock(match[1]);
+            const parsed = parseToolCallBlock(candidate.json);
             if (parsed) {
                 toolCalls.push(parsed);
                 isToolCall = true;
             }
         } catch (e) {
-            const snippet = match[1].replace(/\s+/g, ' ').trim().slice(0, 220);
+            const snippet = candidate.json.replace(/\s+/g, ' ').trim().slice(0, 220);
             console.warn(`[Converter] 无法恢复工具调用 JSON，已按普通文本处理: ${snippet}`, e);
-
         }
 
         if (isToolCall) {
-            cleanText = cleanText.replace(match[0], '');
+            cleanText = cleanText.replace(candidate.full, '');
         }
     }
 
@@ -806,7 +824,9 @@ export function parseToolCalls(responseText: string): {
  * 检查文本是否包含工具调用
  */
 export function hasToolCalls(text: string): boolean {
-    return text.includes('```json');
+    return /```json/i.test(text)
+        || /json\s+action/i.test(text)
+        || (/("tool"|"name")\s*:\s*"/i.test(text) && /"(?:parameters|arguments|input)"\s*:/i.test(text));
 }
 
 /**
