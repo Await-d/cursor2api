@@ -25,8 +25,8 @@ import type {
     CursorSSEEvent,
 } from './types.js';
 import { convertToCursorRequest, parseToolCalls, hasToolCalls } from './converter.js';
-import { sendCursorRequest, sendCursorRequestFull } from './cursor-client.js';
-import { getConfig } from './config.js';
+import { sendCursorRequest, sendCursorRequestFull, isAbortError } from './cursor-client.js';
+import { estimateCursorInputTokens, estimateOpenAICompletionTokens } from './token-estimator.js';
 import {
     isRefusal,
     sanitizeResponse,
@@ -44,6 +44,20 @@ function chatId(): string {
 
 function toolCallId(): string {
     return 'call_' + uuidv4().replace(/-/g, '').substring(0, 24);
+}
+
+function createAbortSignal(req: Request, res: Response): AbortSignal {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    req.on('aborted', abort);
+    req.on('close', abort);
+    res.on('close', abort);
+    controller.signal.addEventListener('abort', () => {
+        req.off('aborted', abort);
+        req.off('close', abort);
+        res.off('close', abort);
+    }, { once: true });
+    return controller.signal;
 }
 
 // ==================== 请求转换：OpenAI → Anthropic ====================
@@ -264,13 +278,17 @@ export async function handleOpenAIChatCompletions(req: Request, res: Response): 
 
         // Step 2: Anthropic → Cursor 格式（复用现有管道）
         const cursorReq = await convertToCursorRequest(anthropicReq);
+        const abortSignal = createAbortSignal(req, res);
 
         if (body.stream) {
-            await handleOpenAIStream(res, cursorReq, body, anthropicReq);
+            await handleOpenAIStream(res, cursorReq, body, anthropicReq, abortSignal);
         } else {
-            await handleOpenAINonStream(res, cursorReq, body, anthropicReq);
+            await handleOpenAINonStream(res, cursorReq, body, anthropicReq, abortSignal);
         }
     } catch (err: unknown) {
+        if (isAbortError(err)) {
+            return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[OpenAI] 请求处理失败:`, message);
         res.status(500).json({
@@ -328,6 +346,7 @@ async function handleOpenAIStream(
     cursorReq: CursorChatRequest,
     body: OpenAIChatRequest,
     anthropicReq: AnthropicRequest,
+    signal: AbortSignal,
 ): Promise<void> {
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
@@ -352,7 +371,6 @@ async function handleOpenAIStream(
     });
 
     let fullResponse = '';
-    let sentText = '';
     let activeCursorReq = cursorReq;
     let retryCount = 0;
 
@@ -362,7 +380,7 @@ async function handleOpenAIStream(
         await sendCursorRequest(activeCursorReq, (event: CursorSSEEvent) => {
             if (event.type !== 'text-delta' || !event.delta) return;
             fullResponse += event.delta;
-        });
+        }, signal);
     };
 
     try {
@@ -408,6 +426,8 @@ async function handleOpenAIStream(
         }
 
         let finishReason: 'stop' | 'tool_calls' = 'stop';
+        let completionContent = '';
+        let completionToolCalls: OpenAIToolCall[] | undefined;
 
         if (hasTools && hasToolCalls(fullResponse)) {
             const { toolCalls, cleanText } = parseToolCalls(fullResponse);
@@ -418,6 +438,7 @@ async function handleOpenAIStream(
                 // 发送工具调用前的残余文本（清洗后）
                 let cleanOutput = isRefusal(cleanText) ? '' : cleanText;
                 cleanOutput = sanitizeResponse(cleanOutput);
+                completionContent = cleanOutput;
                 if (cleanOutput) {
                     writeOpenAISSE(res, {
                         id, object: 'chat.completion.chunk', created, model,
@@ -430,9 +451,18 @@ async function handleOpenAIStream(
                 }
 
                 // 增量流式发送工具调用：先发 name+id，再分块发 arguments
+                completionToolCalls = toolCalls.map(tc => ({
+                    id: toolCallId(),
+                    type: 'function' as const,
+                    function: {
+                        name: tc.name,
+                        arguments: JSON.stringify(tc.arguments),
+                    },
+                }));
+
                 for (let i = 0; i < toolCalls.length; i++) {
                     const tc = toolCalls[i];
-                    const tcId = toolCallId();
+                    const tcId = completionToolCalls[i].id;
                     const argsStr = JSON.stringify(tc.arguments);
 
                     // 第一帧：发送 name + id， arguments 为空
@@ -479,6 +509,7 @@ async function handleOpenAIStream(
                 } else {
                     textToSend = sanitizeResponse(fullResponse);
                 }
+                completionContent = textToSend;
                 writeOpenAISSE(res, {
                     id, object: 'chat.completion.chunk', created, model,
                     choices: [{
@@ -491,6 +522,7 @@ async function handleOpenAIStream(
         } else {
             // 无工具模式或无工具调用 — 统一清洗后发送
             const sanitized = sanitizeResponse(fullResponse);
+            completionContent = sanitized;
             if (sanitized) {
                 writeOpenAISSE(res, {
                     id, object: 'chat.completion.chunk', created, model,
@@ -512,16 +544,27 @@ async function handleOpenAIStream(
                 finish_reason: finishReason,
             }],
         });
-        const usageTokens = Math.ceil(fullResponse.length / 4);
+        const promptTokens = estimateCursorInputTokens(activeCursorReq);
+        const completionTokens = Math.max(1, estimateOpenAICompletionTokens(
+            completionContent || null,
+            completionToolCalls,
+        ));
         writeOpenAISSE(res, {
             id, object: 'chat.completion.chunk', created, model,
             choices: [],
-            usage: { prompt_tokens: 100, completion_tokens: usageTokens, total_tokens: 100 + usageTokens },
+            usage: {
+                prompt_tokens: promptTokens,
+                completion_tokens: completionTokens,
+                total_tokens: promptTokens + completionTokens,
+            },
         });
 
         res.write('data: [DONE]\n\n');
 
     } catch (err: unknown) {
+        if (isAbortError(err)) {
+            return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         writeOpenAISSE(res, {
             id, object: 'chat.completion.chunk', created, model,
@@ -544,8 +587,10 @@ async function handleOpenAINonStream(
     cursorReq: CursorChatRequest,
     body: OpenAIChatRequest,
     anthropicReq: AnthropicRequest,
+    signal: AbortSignal,
 ): Promise<void> {
-    let fullText = await sendCursorRequestFull(cursorReq);
+    let activeCursorReq = cursorReq;
+    let fullText = await sendCursorRequestFull(activeCursorReq, signal);
     const hasTools = (body.tools?.length ?? 0) > 0;
 
     console.log(`[OpenAI] 非流式原始响应 (${fullText.length} chars, tools=${hasTools}): ${fullText.substring(0, 300)}${fullText.length > 300 ? '...' : ''}`);
@@ -558,7 +603,8 @@ async function handleOpenAINonStream(
             console.log(`[OpenAI] 非流式：检测到拒绝（第${attempt + 1}次重试）...原始: ${fullText.substring(0, 100)}`);
             const retryBody = buildRetryRequest(anthropicReq, attempt);
             const retryCursorReq = await convertToCursorRequest(retryBody);
-            fullText = await sendCursorRequestFull(retryCursorReq);
+            activeCursorReq = retryCursorReq;
+            fullText = await sendCursorRequestFull(retryCursorReq, signal);
             if (!shouldRetry()) break;
         }
         if (shouldRetry()) {
@@ -613,6 +659,9 @@ async function handleOpenAINonStream(
         content = sanitizeResponse(fullText);
     }
 
+    const promptTokens = estimateCursorInputTokens(activeCursorReq);
+    const completionTokens = Math.max(1, estimateOpenAICompletionTokens(content, toolCalls));
+
     const response: OpenAIChatCompletion = {
         id: chatId(),
         object: 'chat.completion',
@@ -628,9 +677,9 @@ async function handleOpenAINonStream(
             finish_reason: finishReason,
         }],
         usage: {
-            prompt_tokens: 100,
-            completion_tokens: Math.ceil(fullText.length / 4),
-            total_tokens: 100 + Math.ceil(fullText.length / 4),
+            prompt_tokens: promptTokens,
+            completion_tokens: completionTokens,
+            total_tokens: promptTokens + completionTokens,
         },
     };
 

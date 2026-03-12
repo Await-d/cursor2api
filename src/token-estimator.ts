@@ -4,6 +4,7 @@ import type {
     AnthropicMessage,
     AnthropicRequest,
     AnthropicTool,
+    CursorChatRequest,
 } from './types.js';
 
 const WESTERN_RANGES: Array<[number, number]> = [
@@ -71,9 +72,21 @@ function estimateMessageContentTokens(content: AnthropicMessage['content']): num
 
         if (block.type === 'tool_result') {
             total += estimateToolResultTokens(block);
+            continue;
+        }
+
+        if (block.type === 'tool_use') {
+            total += estimateToolUseTokens(block);
         }
     }
 
+    return total;
+}
+
+function estimateToolUseTokens(block: AnthropicContentBlock): number {
+    let total = 0;
+    if (block.name) total += estimateTextTokens(block.name);
+    if (block.input) total += estimateTextTokens(JSON.stringify(block.input));
     return total;
 }
 
@@ -146,16 +159,40 @@ export function estimateAnthropicOutputTokens(blocks: AnthropicContentBlock[]): 
 
         if (block.type === 'tool_use') {
             total += estimateTextTokens(JSON.stringify(block.input || {}));
+            if (block.name) total += estimateTextTokens(block.name);
         }
     }
 
     return Math.max(1, total);
 }
 
-export function estimateOpenAICompletionTokens(content: string | null, toolCalls?: Array<{ function: { arguments: string } }>): number {
+export function estimateCursorInputTokens(req: CursorChatRequest): number {
+    let total = 0;
+
+    for (const context of req.context ?? []) {
+        if (context.content) total += estimateTextTokens(context.content);
+        if (context.filePath) total += estimateTextTokens(context.filePath);
+    }
+
+    for (const message of req.messages ?? []) {
+        for (const part of message.parts ?? []) {
+            if (part.text) total += estimateTextTokens(part.text);
+        }
+    }
+
+    return Math.max(1, total);
+}
+
+export function estimateOpenAICompletionTokens(
+    content: string | null,
+    toolCalls?: Array<{ function: { arguments: string; name?: string } }>,
+): number {
     let total = content ? estimateTextTokens(content) : 0;
 
     for (const toolCall of toolCalls ?? []) {
+        if (toolCall.function.name) {
+            total += estimateTextTokens(toolCall.function.name);
+        }
         total += estimateTextTokens(toolCall.function.arguments || '');
     }
 

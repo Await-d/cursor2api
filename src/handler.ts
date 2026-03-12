@@ -17,9 +17,9 @@ import type {
     ParsedToolCall,
 } from './types.js';
 import { convertToCursorRequest, parseToolCalls, hasToolCalls } from './converter.js';
-import { sendCursorRequest, sendCursorRequestFull } from './cursor-client.js';
+import { sendCursorRequest, sendCursorRequestFull, isAbortError } from './cursor-client.js';
 import { getConfig } from './config.js';
-import { estimateAnthropicInputTokens, estimateAnthropicOutputTokens } from './token-estimator.js';
+import { estimateAnthropicInputTokens, estimateAnthropicOutputTokens, estimateCursorInputTokens } from './token-estimator.js';
 
 function msgId(): string {
     return 'msg_' + uuidv4().replace(/-/g, '').substring(0, 24);
@@ -27,6 +27,20 @@ function msgId(): string {
 
 function toolId(): string {
     return 'toolu_' + uuidv4().replace(/-/g, '').substring(0, 24);
+}
+
+function createAbortSignal(req: Request, res: Response): AbortSignal {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    req.on('aborted', abort);
+    req.on('close', abort);
+    res.on('close', abort);
+    controller.signal.addEventListener('abort', () => {
+        req.off('aborted', abort);
+        req.off('close', abort);
+        res.off('close', abort);
+    }, { once: true });
+    return controller.signal;
 }
 
 // ==================== 拒绝模式识别 ====================
@@ -381,12 +395,16 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
         // 转换为 Cursor 请求
         const cursorReq = await convertToCursorRequest(body);
 
+        const abortSignal = createAbortSignal(req, res);
         if (body.stream) {
-            await handleStream(res, cursorReq, body);
+            await handleStream(res, cursorReq, body, abortSignal);
         } else {
-            await handleNonStream(res, cursorReq, body);
+            await handleNonStream(res, cursorReq, body, abortSignal);
         }
     } catch (err: unknown) {
+        if (isAbortError(err)) {
+            return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[Handler] 请求处理失败:`, message);
         res.status(500).json({
@@ -455,24 +473,32 @@ export function buildToolRetryCursorRequest(cursorReq: CursorChatRequest): Curso
     };
 }
 
-export async function resolveToolResponse(cursorReq: CursorChatRequest, initialResponse?: string, body?: AnthropicRequest): Promise<{
+export async function resolveToolResponse(
+    cursorReq: CursorChatRequest,
+    initialResponse?: string,
+    body?: AnthropicRequest,
+    signal?: AbortSignal,
+): Promise<{
     fullText: string;
     toolCalls: ParsedToolCall[];
     cleanText: string;
 }> {
-    let fullText = initialResponse ?? await sendCursorRequestFull(cursorReq);
+    let fullText = initialResponse ?? '';
+    if (!initialResponse) {
+        fullText = await sendCursorRequestFull(cursorReq, signal);
+    }
     let parsed = parseToolCalls(fullText);
 
     if (parsed.toolCalls.length === 0) {
         console.log(`[Handler] 工具调用解析失败，发送协议纠正提示重试...`);
-        fullText = await sendCursorRequestFull(buildToolRetryCursorRequest(cursorReq));
+        fullText = await sendCursorRequestFull(buildToolRetryCursorRequest(cursorReq), signal);
         parsed = parseToolCalls(fullText);
     }
 
     if (parsed.toolCalls.length === 0 && body) {
         console.log(`[Handler] 协议纠正后仍无工具调用（${isRefusal(fullText) ? '拒绝响应' : '纯文本'}），尝试认知重构重发...`);
         const reframed = await convertToCursorRequest(buildRetryRequest(body, 0));
-        fullText = await sendCursorRequestFull(reframed);
+        fullText = await sendCursorRequestFull(reframed, signal);
         parsed = parseToolCalls(fullText);
     }
 
@@ -485,7 +511,7 @@ export async function resolveToolResponse(cursorReq: CursorChatRequest, initialR
 
 // ==================== 流式处理 ====================
 
-async function handleStream(res: Response, cursorReq: CursorChatRequest, body: AnthropicRequest): Promise<void> {
+async function handleStream(res: Response, cursorReq: CursorChatRequest, body: AnthropicRequest, signal: AbortSignal): Promise<void> {
     // 设置 SSE headers
     res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
@@ -497,7 +523,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
     const id = msgId();
     const model = cursorReq.model;
     const hasTools = (body.tools?.length ?? 0) > 0;
-    const estimatedInputTokens = estimateAnthropicInputTokens(body);
+    const estimatedInputTokens = estimateCursorInputTokens(cursorReq);
 
     // 发送 message_start
     writeSSE(res, 'message_start', {
@@ -531,7 +557,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 
             // 有工具时始终缓冲，无工具时也缓冲（用于拒绝检测）
             // 不再直接流式发送，统一在流结束后处理
-        });
+        }, signal);
     };
 
     try {
@@ -584,7 +610,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         }
 
         if (hasTools) {
-            resolvedToolResponse = await resolveToolResponse(activeCursorReq, fullResponse, body);
+            resolvedToolResponse = await resolveToolResponse(activeCursorReq, fullResponse, body, signal);
             fullResponse = resolvedToolResponse.fullText;
         }
 
@@ -763,6 +789,9 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         writeSSE(res, 'message_stop', { type: 'message_stop' });
 
     } catch (err: unknown) {
+        if (isAbortError(err)) {
+            return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         writeSSE(res, 'error', {
             type: 'error', error: { type: 'api_error', message },
@@ -776,10 +805,10 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 
 // ==================== 非流式处理 ====================
 
-async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body: AnthropicRequest): Promise<void> {
-    let fullText = await sendCursorRequestFull(cursorReq);
+async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body: AnthropicRequest, signal: AbortSignal): Promise<void> {
+    let activeCursorReq = cursorReq;
+    let fullText = await sendCursorRequestFull(activeCursorReq, signal);
     const hasTools = (body.tools?.length ?? 0) > 0;
-    const estimatedInputTokens = estimateAnthropicInputTokens(body);
 
     console.log(`[Handler] 非流式原始响应 (${fullText.length} chars, tools=${hasTools}): ${fullText.substring(0, 300)}${fullText.length > 300 ? '...' : ''}`);
 
@@ -791,7 +820,8 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
             console.log(`[Handler] 非流式：检测到拒绝（第${attempt + 1}次重试）...原始: ${fullText.substring(0, 100)}`);
             const retryBody = buildRetryRequest(body, attempt);
             const retryCursorReq = await convertToCursorRequest(retryBody);
-            fullText = await sendCursorRequestFull(retryCursorReq);
+            activeCursorReq = retryCursorReq;
+            fullText = await sendCursorRequestFull(retryCursorReq, signal);
             if (!shouldRetry()) break;
         }
         if (shouldRetry()) {
@@ -812,7 +842,7 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
     let stopReason: AnthropicResponse['stop_reason'] = 'end_turn';
 
     if (hasTools) {
-        const resolved = await resolveToolResponse(cursorReq, fullText, body);
+        const resolved = await resolveToolResponse(activeCursorReq, fullText, body, signal);
         fullText = resolved.fullText;
         let { toolCalls, cleanText } = resolved;
 
@@ -848,6 +878,7 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
         contentBlocks.push({ type: 'text', text: sanitizeResponse(fullText) });
     }
 
+    const estimatedInputTokens = estimateCursorInputTokens(activeCursorReq);
     const response: AnthropicResponse = {
         id: msgId(),
         type: 'message',
