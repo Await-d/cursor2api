@@ -6,6 +6,12 @@ export interface QueuedTask<T> {
     id: string;
 }
 
+export class RequestAbortedError extends Error {
+    constructor() {
+        super('Request aborted');
+    }
+}
+
 export interface RequestQueueOptions {
     concurrency: number;
     queueTimeout: number;
@@ -49,15 +55,64 @@ export class RequestQueue {
         return this.queue.length;
     }
 
-    enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    enqueue<T>(fn: () => Promise<T>, options: { signal?: AbortSignal } = {}): Promise<T> {
         return new Promise<T>((resolve, reject) => {
             const taskId = nextTaskId();
             const enqueuedAt = Date.now();
+            const signal = options.signal;
+            let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+            let onAbort: (() => void) | null = null;
+            const cleanupAbort = () => {
+                if (signal && onAbort) {
+                    signal.removeEventListener('abort', onAbort);
+                    onAbort = null;
+                }
+            };
+
+            const abortTask = () => {
+                const idx = this.queue.findIndex(t => t.id === taskId);
+                if (idx !== -1) {
+                    this.queue.splice(idx, 1);
+                }
+                if (timeoutHandle) {
+                    clearTimeout(timeoutHandle);
+                    timeoutHandle = null;
+                }
+                reject(new RequestAbortedError());
+            };
+
+            if (signal?.aborted) {
+                abortTask();
+                return;
+            }
+
+            if (signal) {
+                onAbort = () => {
+                    cleanupAbort();
+                    abortTask();
+                };
+                signal.addEventListener('abort', onAbort, { once: true });
+            }
 
             const task: QueuedTask<unknown> = {
                 fn: fn as () => Promise<unknown>,
-                resolve: resolve as (value: unknown) => void,
-                reject,
+                resolve: (value: unknown) => {
+                    if (timeoutHandle) {
+                        clearTimeout(timeoutHandle);
+                        timeoutHandle = null;
+                    }
+                    cleanupAbort();
+                    resolve(value as T);
+                },
+                reject: (reason: unknown) => {
+                    if (timeoutHandle) {
+                        clearTimeout(timeoutHandle);
+                        timeoutHandle = null;
+                    }
+                    cleanupAbort();
+                    reject(reason);
+                },
                 enqueuedAt,
                 id: taskId,
             };
@@ -68,7 +123,7 @@ export class RequestQueue {
                 this.queue.push(task);
                 console.log(`[Queue] [${taskId}] 入队等待 (运行中=${this.running}/${this.options.concurrency}, 队列长度=${this.queue.length})`);
 
-                const timeoutHandle = setTimeout(() => {
+                timeoutHandle = setTimeout(() => {
                     const idx = this.queue.findIndex(t => t.id === taskId);
                     if (idx !== -1) {
                         this.queue.splice(idx, 1);
@@ -77,17 +132,6 @@ export class RequestQueue {
                         reject(new Error(`Request queue timeout after ${waited}ms`));
                     }
                 }, this.options.queueTimeout);
-
-                const origReject = task.reject;
-                task.reject = (reason: unknown) => {
-                    clearTimeout(timeoutHandle);
-                    origReject(reason);
-                };
-                const origResolve = task.resolve;
-                task.resolve = (value: unknown) => {
-                    clearTimeout(timeoutHandle);
-                    origResolve(value);
-                };
             }
         });
     }

@@ -1,10 +1,9 @@
 import * as https from 'https';
-import * as http from 'http';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import type { CursorChatRequest, CursorSSEEvent } from './types.js';
 import { getConfig } from './config.js';
-import { getQueue, RequestQueue } from './queue.js';
+import { getQueue, RequestQueue, RequestAbortedError } from './queue.js';
 
 const CURSOR_CHAT_API_HOST = 'cursor.com';
 const CURSOR_CHAT_API_PATH = '/api/chat';
@@ -14,7 +13,7 @@ let proxyIndex = 0;
 /** 记录最近连接失败的代理（ECONNREFUSED 等网络错误），value = 失败时间戳 */
 const deadProxies = new Map<string, number>();
 /** 代理被标记为死亡后的冷却时间（ms），过后重新尝试 */
-const DEAD_PROXY_COOLDOWN = 60_000;
+const DEAD_PROXY_COOLDOWN = 300_000;
 
 function nextProxyUrl(): string | null {
     const pool = getConfig().proxyPool;
@@ -120,38 +119,68 @@ function getChromeHeaders(): Record<string, string> {
 class RateLimitError extends Error {
     retryAfterMs: number;
     constructor(retryAfterMs: number) {
-        super(`Cursor API 429 限流，等待 ${retryAfterMs}ms 后重试`);
+        const hint = retryAfterMs > 0 ? `，建议等待 ${retryAfterMs}ms` : '';
+        super(`Cursor API 429 限流${hint}`);
         this.retryAfterMs = retryAfterMs;
     }
+}
+
+export function isAbortError(err: unknown): boolean {
+    return err instanceof RequestAbortedError;
+}
+
+function parseRetryAfterMs(value: string | string[] | undefined): number {
+    if (!value) return 0;
+    const raw = Array.isArray(value) ? value[0] : value;
+    const trimmed = raw.trim();
+    if (!trimmed) return 0;
+    const seconds = Number(trimmed);
+    if (Number.isFinite(seconds)) {
+        return Math.max(0, Math.round(seconds * 1000));
+    }
+    const dateMs = Date.parse(trimmed);
+    if (!Number.isNaN(dateMs)) {
+        const delta = dateMs - Date.now();
+        return delta > 0 ? delta : 0;
+    }
+    return 0;
 }
 
 export async function sendCursorRequest(
     req: CursorChatRequest,
     onChunk: (event: CursorSSEEvent) => void,
+    signal?: AbortSignal,
 ): Promise<void> {
     const queue = getQueue();
     const config = getConfig();
-    const MAX_429_RETRIES = 4;
+    let attempt429 = 0;
 
-    for (let attempt429 = 1; attempt429 <= MAX_429_RETRIES; attempt429++) {
+    while (true) {
+        if (signal?.aborted) {
+            throw new RequestAbortedError();
+        }
         try {
-            await queue.enqueue(() => sendCursorRequestWithProxyRetries(req, onChunk));
+            await queue.enqueue(() => sendCursorRequestWithProxyRetries(req, onChunk, signal), { signal });
             return;
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            const is429 = err instanceof RateLimitError || msg.includes('429') || msg.toLowerCase().includes('rate limit') || msg.toLowerCase().includes('too many');
+            const is429 = err instanceof RateLimitError
+                || /HTTP\s*429/i.test(msg)
+                || /rate\s*limit/i.test(msg)
+                || /too\s+many\s+requests/i.test(msg);
 
-            if (is429 && attempt429 < MAX_429_RETRIES) {
-                const delay = RequestQueue.computeRetryDelay(attempt429, config.retryDelay, config.maxRetryDelay);
-                console.warn(`[Cursor] 429 限流 (第${attempt429}次)，${delay}ms 后重试... (队列 运行中=${queue.activeCount}, 等待=${queue.pendingCount})`);
-                await new Promise(r => setTimeout(r, delay));
-                continue;
+            if (!is429) {
+                throw err;
             }
 
-            if (is429) {
-                console.error(`[Cursor] 429 限流重试 ${MAX_429_RETRIES} 次后仍失败`);
-            }
-            throw err;
+            attempt429++;
+            const retryAfterMs = err instanceof RateLimitError ? err.retryAfterMs : 0;
+            const cappedRetryAfterMs = retryAfterMs > 0 ? Math.min(retryAfterMs, config.maxRetryDelay) : 0;
+            const backoffDelay = RequestQueue.computeRetryDelay(attempt429, config.retryDelay, config.maxRetryDelay);
+            const delay = Math.max(backoffDelay, cappedRetryAfterMs);
+            const retryHint = cappedRetryAfterMs > 0 ? `, Retry-After=${cappedRetryAfterMs}ms` : '';
+            console.warn(`[Cursor] 429 限流 (第${attempt429}次)，${delay}ms 后继续排队重试...${retryHint} (队列 运行中=${queue.activeCount}, 等待=${queue.pendingCount})`);
+            await new Promise(r => setTimeout(r, delay));
         }
     }
 }
@@ -159,20 +188,27 @@ export async function sendCursorRequest(
 async function sendCursorRequestWithProxyRetries(
     req: CursorChatRequest,
     onChunk: (event: CursorSSEEvent) => void,
+    signal?: AbortSignal,
 ): Promise<void> {
     const maxRetries = 3;
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        if (signal?.aborted) {
+            throw new RequestAbortedError();
+        }
         const proxyUrl = nextProxyUrl();
         const agent = makeAgent(proxyUrl);
         try {
-            await sendCursorRequestInner(req, onChunk, agent, proxyUrl);
+            await sendCursorRequestInner(req, onChunk, agent, proxyUrl, signal);
             return;
         } catch (err) {
             lastError = err;
 
             if (err instanceof RateLimitError) {
+                throw err;
+            }
+            if (err instanceof RequestAbortedError) {
                 throw err;
             }
 
@@ -192,7 +228,7 @@ async function sendCursorRequestWithProxyRetries(
     if (pool && pool.length > 0) {
         console.warn('[Cursor] 所有代理重试失败，最终尝试直连...');
         try {
-            await sendCursorRequestInner(req, onChunk, undefined, null);
+            await sendCursorRequestInner(req, onChunk, undefined, null, signal);
             return;
         } catch (directErr) {
             const msg = directErr instanceof Error ? directErr.message : String(directErr);
@@ -209,6 +245,7 @@ async function sendCursorRequestInner(
     onChunk: (event: CursorSSEEvent) => void,
     agent: https.Agent | undefined,
     proxyUrl: string | null,
+    signal?: AbortSignal,
 ): Promise<void> {
     const headers = getChromeHeaders();
     const body = JSON.stringify(req);
@@ -217,6 +254,10 @@ async function sendCursorRequestInner(
     console.log(`[Cursor] 发送请求: model=${req.model}, messages=${req.messages.length}${proxyUrl ? ` [proxy=${proxyUrl}]` : ''}`);
 
     return new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(new RequestAbortedError());
+            return;
+        }
         let idleTimer: ReturnType<typeof setTimeout> | null = null;
         let connectTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -253,8 +294,7 @@ async function sendCursorRequestInner(
 
                 clearIdle();
 
-                const retryAfter = res.headers['retry-after'];
-                const waitMs = retryAfter ? parseInt(String(retryAfter)) * 1000 : 0;
+                const waitMs = parseRetryAfterMs(res.headers['retry-after']);
                 res.resume();
                 reject(new RateLimitError(waitMs));
                 return;
@@ -310,6 +350,19 @@ async function sendCursorRequestInner(
             });
         });
 
+        if (signal) {
+            const onAbort = () => {
+                clearIdle();
+                clearConnect();
+                reqHttp.destroy(new RequestAbortedError());
+            };
+            if (signal.aborted) {
+                onAbort();
+                return;
+            }
+            signal.addEventListener('abort', onAbort, { once: true });
+        }
+
         reqHttp.on('error', (err) => {
 
             clearIdle();
@@ -324,12 +377,25 @@ async function sendCursorRequestInner(
     });
 }
 
-export async function sendCursorRequestFull(req: CursorChatRequest): Promise<string> {
+export async function sendCursorRequestFull(req: CursorChatRequest, signal?: AbortSignal): Promise<string> {
+    const { fullText } = await sendCursorRequestFullWithUsage(req, signal);
+    return fullText;
+}
+
+export async function sendCursorRequestFullWithUsage(
+    req: CursorChatRequest,
+    signal?: AbortSignal,
+): Promise<{
+    fullText: string;
+    usage?: CursorSSEEvent['usage'];
+}> {
     let fullText = '';
+    let usage: CursorSSEEvent['usage'] | undefined;
     await sendCursorRequest(req, (event) => {
         if (event.type === 'text-delta' && event.delta) {
             fullText += event.delta;
         }
-    });
-    return fullText;
+        if (event.usage) usage = event.usage;
+    }, signal);
+    return { fullText, usage };
 }
