@@ -83,6 +83,24 @@ OPENAI_BASE_URL=http://localhost:3010/v1
 docker compose up -d --build
 ```
 
+默认会启动两个等价实例：
+- `cursor2api` → `http://localhost:3010`
+- `cursor2api-2` → `http://localhost:3011`
+
+如果你只需要一个实例，可以只启动主服务：
+
+```bash
+docker compose up -d --build cursor2api
+```
+
+如需调整宿主机端口，可在执行前导出环境变量：
+
+```bash
+export HOST_PORT_1=4010
+export HOST_PORT_2=4011
+docker compose up -d --build
+```
+
 代码更新后，请使用下面的命令重新构建并重建容器，确保最新的 `src/` 变更进入镜像并生成新的 `dist/`：
 
 ```bash
@@ -101,6 +119,8 @@ npm run docker:deploy
 - `docker compose restart` 只适合重新读取挂载进容器的 `config.yaml`
 - 修改了 `src/`、`package.json`、`package-lock.json`、`tsconfig.json` 后，必须重新 build + recreate
 - `.env.docker` 变更会影响容器环境变量，应执行 `docker compose up -d --force-recreate`
+- 运行时环境变量统一放在 `.env.docker`；`config.yaml` 用于应用配置，若两边都定义同名项，则环境变量优先
+- 部署脚本 `./deploy.sh --docker` 现在会等待所有容器通过健康检查后再返回
 
 ## 项目结构
 

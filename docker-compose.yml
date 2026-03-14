@@ -1,50 +1,34 @@
+x-cursor2api-common: &cursor2api-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: cursor2api:latest
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 20s
+  env_file:
+    - .env.docker
+  environment:
+    NODE_ENV: production
+    PORT: 3010
+  volumes:
+    # 挂载外部配置文件（推荐）——修改后只需 docker compose restart 即可生效
+    - ./config.yaml:/app/config.yaml:ro
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
   cursor2api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: cursor2api:latest
+    <<: *cursor2api-common
     container_name: cursor2api
-    restart: unless-stopped
     ports:
-      - "3010:3010"
-    volumes:
-      # 挂载外部配置文件（推荐）——修改后只需 docker compose restart 即可生效
-      - ./config.yaml:/app/config.yaml:ro
-    environment:
-      - NODE_ENV=production
-      - PORT=3010
-      - TIMEOUT=120
-      - PROXY=
-      - CONCURRENCY=8
-      # - CURSOR_MODEL=anthropic/claude-sonnet-4.6
-      # - QUEUE_TIMEOUT=120000
-      # - RETRY_DELAY=5000
-      # - MAX_RETRY_DELAY=60000
-    env_file:
-      - .env.docker
+      - "${HOST_PORT_1:-3010}:3010"
 
   cursor2api-2:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: cursor2api:latest
+    <<: *cursor2api-common
     container_name: cursor2api-2
-    restart: unless-stopped
     ports:
-      - "3011:3010"
-    volumes:
-      # 挂载外部配置文件（推荐）——修改后只需 docker compose restart 即可生效
-      - ./config.yaml:/app/config.yaml:ro
-    environment:
-      - NODE_ENV=production
-      - PORT=3010
-      - TIMEOUT=120
-      - PROXY=
-      - CONCURRENCY=8
-      # - CURSOR_MODEL=anthropic/claude-sonnet-4.6
-      # - QUEUE_TIMEOUT=120000
-      # - RETRY_DELAY=5000
-      # - MAX_RETRY_DELAY=60000
-    env_file:
-      - .env.docker
+      - "${HOST_PORT_2:-3011}:3010"
