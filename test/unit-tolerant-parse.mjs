@@ -11,17 +11,93 @@
 // 如果没有 dist，也可以把 tolerantParse 的实现复制到此处做测试
 
 // ─── 内联 tolerantParse（与 src/converter.ts 保持同步）──────────────────────
+function normalizeJsonLikeSingleQuotedStrings(input) {
+    let result = '';
+    let index = 0;
+    let inDoubleQuotedString = false;
+    let doubleQuotedEscaped = false;
+
+    while (index < input.length) {
+        const char = input[index];
+
+        if (inDoubleQuotedString) {
+            result += char;
+            if (doubleQuotedEscaped) {
+                doubleQuotedEscaped = false;
+            } else if (char === '\\') {
+                doubleQuotedEscaped = true;
+            } else if (char === '"') {
+                inDoubleQuotedString = false;
+            }
+            index++;
+            continue;
+        }
+
+        if (char === '"') {
+            inDoubleQuotedString = true;
+            result += char;
+            index++;
+            continue;
+        }
+
+        if (char !== "'") {
+            result += char;
+            index++;
+            continue;
+        }
+
+        index++;
+        let singleQuotedValue = '';
+        let singleQuotedClosed = false;
+
+        while (index < input.length) {
+            const valueChar = input[index];
+            if (valueChar === '\\' && index + 1 < input.length) {
+                const escapedChar = input[index + 1];
+                if (escapedChar === 'n') singleQuotedValue += '\n';
+                else if (escapedChar === 'r') singleQuotedValue += '\r';
+                else if (escapedChar === 't') singleQuotedValue += '\t';
+                else singleQuotedValue += escapedChar;
+                index += 2;
+                continue;
+            }
+
+            if (valueChar === "'") {
+                singleQuotedClosed = true;
+                index++;
+                break;
+            }
+
+            singleQuotedValue += valueChar;
+            index++;
+        }
+
+        if (!singleQuotedClosed) {
+            result += "'" + singleQuotedValue;
+            break;
+        }
+
+        result += JSON.stringify(singleQuotedValue);
+    }
+
+    return result;
+}
+
 function tolerantParse(jsonStr) {
+    const normalizedJsonStr = normalizeJsonLikeSingleQuotedStrings(jsonStr);
+
     try {
-        return JSON.parse(jsonStr);
-    } catch (_e1) { /* pass */ }
+        return JSON.parse(normalizedJsonStr);
+    } catch (_e1) {
+        /* pass */
+    }
 
     let inString = false;
     let fixed = '';
     const bracketStack = [];
 
-    for (let i = 0; i < jsonStr.length; i++) {
-        const char = jsonStr[i];
+    for (let i = 0; i < normalizedJsonStr.length; i++) {
+        const char = normalizedJsonStr[i];
         if (char === '"') {
             let backslashCount = 0;
             for (let j = fixed.length - 1; j >= 0 && fixed[j] === '\\'; j--) backslashCount++;
@@ -53,10 +129,10 @@ function tolerantParse(jsonStr) {
             try { return JSON.parse(fixed.substring(0, lastBrace + 1)); } catch { /* ignore */ }
         }
         try {
-            const toolMatch = jsonStr.match(/"(?:tool|name)"\s*:\s*"([^"]+)"/);
+            const toolMatch = normalizedJsonStr.match(/"(?:tool|name)"\s*:\s*"([^"]+)"/);
             if (toolMatch) {
                 const toolName = toolMatch[1];
-                const paramsMatch = jsonStr.match(/"(?:parameters|arguments|input)"\s*:\s*(\{[\s\S]*)/);
+                const paramsMatch = normalizedJsonStr.match(/"(?:parameters|arguments|input)"\s*:\s*(\{[\s\S]*)/);
                 let params = {};
                 if (paramsMatch) {
                     const paramsStr = paramsMatch[1];
@@ -92,13 +168,13 @@ function tolerantParse(jsonStr) {
         } catch { /* ignore */ }
 
         try {
-            const toolMatch2 = jsonStr.match(/["'](?:tool|name)["']\s*:\s*["']([^"']+)["']/);
+            const toolMatch2 = normalizedJsonStr.match(/["'](?:tool|name)["']\s*:\s*["']([^"']+)["']/);
             if (toolMatch2) {
                 const toolName = toolMatch2[1];
                 const params = {};
                 const bigValueFields = ['content', 'command', 'text', 'new_string', 'new_str', 'file_text', 'code'];
                 const smallFieldRegex = /"(file_path|path|file|old_string|old_str|insert_line|mode|encoding|description|language|name)"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-                for (let sfm = smallFieldRegex.exec(jsonStr); sfm !== null; sfm = smallFieldRegex.exec(jsonStr)) {
+                for (let sfm = smallFieldRegex.exec(normalizedJsonStr); sfm !== null; sfm = smallFieldRegex.exec(normalizedJsonStr)) {
                     params[sfm[1]] = sfm[2]
                         .replace(/\\n/g, '\n')
                         .replace(/\\t/g, '\t')
@@ -106,16 +182,16 @@ function tolerantParse(jsonStr) {
                         .replace(/\\\\/g, '\\');
                 }
                 for (const field of bigValueFields) {
-                    const fieldStart = jsonStr.indexOf(`"${field}"`);
+                    const fieldStart = normalizedJsonStr.indexOf(`"${field}"`);
                     if (fieldStart === -1) continue;
-                    const colonPos = jsonStr.indexOf(':', fieldStart + field.length + 2);
+                    const colonPos = normalizedJsonStr.indexOf(':', fieldStart + field.length + 2);
                     if (colonPos === -1) continue;
-                    const valueStart = jsonStr.indexOf('"', colonPos);
+                    const valueStart = normalizedJsonStr.indexOf('"', colonPos);
                     if (valueStart === -1) continue;
-                    let valueEnd = jsonStr.length - 1;
-                    while (valueEnd > valueStart && /[}\]\s,]/.test(jsonStr[valueEnd])) valueEnd--;
-                    if (jsonStr[valueEnd] === '"' && valueEnd > valueStart + 1) {
-                        const rawValue = jsonStr.substring(valueStart + 1, valueEnd);
+                    let valueEnd = normalizedJsonStr.length - 1;
+                    while (valueEnd > valueStart && /[}\]\s,]/.test(normalizedJsonStr[valueEnd])) valueEnd--;
+                    if (normalizedJsonStr[valueEnd] === '"' && valueEnd > valueStart + 1) {
+                        const rawValue = normalizedJsonStr.substring(valueStart + 1, valueEnd);
                         try {
                             params[field] = JSON.parse(`"${rawValue}"`);
                         } catch {
@@ -143,11 +219,135 @@ function parseToolCalls(responseText) {
     const toolCalls = [];
     let cleanText = responseText;
 
+    function extractJsonValueSlice(jsonStr, startIndex) {
+        let index = startIndex;
+        while (index < jsonStr.length && /\s/.test(jsonStr[index])) index++;
+        if (index >= jsonStr.length) return null;
+
+        const startChar = jsonStr[index];
+        if (startChar === '{' || startChar === '[') {
+            const stack = [startChar];
+            let inString = false;
+            let escaped = false;
+            for (let i = index + 1; i < jsonStr.length; i++) {
+                const char = jsonStr[i];
+                if (inString) {
+                    if (escaped) escaped = false;
+                    else if (char === '\\') escaped = true;
+                    else if (char === '"') inString = false;
+                    continue;
+                }
+                if (char === '"') {
+                    inString = true;
+                    continue;
+                }
+                if (char === '{' || char === '[') {
+                    stack.push(char);
+                    continue;
+                }
+                if (char === '}' || char === ']') {
+                    const expected = char === '}' ? '{' : '[';
+                    if (stack[stack.length - 1] === expected) {
+                        stack.pop();
+                        if (stack.length === 0) return jsonStr.slice(index, i + 1);
+                    }
+                }
+            }
+            return jsonStr.slice(index);
+        }
+
+        if (startChar === '"') {
+            let escaped = false;
+            for (let i = index + 1; i < jsonStr.length; i++) {
+                const char = jsonStr[i];
+                if (escaped) {
+                    escaped = false;
+                    continue;
+                }
+                if (char === '\\') {
+                    escaped = true;
+                    continue;
+                }
+                if (char === '"') return jsonStr.slice(index, i + 1);
+            }
+            return jsonStr.slice(index);
+        }
+
+        let endIndex = index;
+        while (endIndex < jsonStr.length && !/[\s,}\]]/.test(jsonStr[endIndex])) endIndex++;
+        return jsonStr.slice(index, endIndex);
+    }
+
+    function extractStructuredArgumentRawValue(jsonStr) {
+        for (const fieldName of ['parameters', 'arguments', 'input']) {
+            const fieldRegex = new RegExp(`"${fieldName}"\\s*:`);
+            const fieldMatch = fieldRegex.exec(jsonStr);
+            if (!fieldMatch) continue;
+
+            const rawValue = extractJsonValueSlice(jsonStr, fieldMatch.index + fieldMatch[0].length);
+            if (rawValue) return rawValue;
+        }
+        return null;
+    }
+
+    function hasMeaningfulStructuredArgumentPayload(jsonStr) {
+        const rawValue = extractStructuredArgumentRawValue(jsonStr);
+        if (!rawValue) return false;
+        const trimmed = rawValue.trim();
+        return trimmed !== '' && trimmed !== '{}' && trimmed !== '[]' && trimmed !== 'null';
+    }
+
+    function isEmptyArgumentObject(value) {
+        return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length === 0;
+    }
+
+    function hasToolCallSignature(jsonStr) {
+        if (/["']tool["']\s*:/i.test(jsonStr)) return true;
+        return /["']name["']\s*:/i.test(jsonStr)
+            && /["'](?:parameters|arguments|input)["']\s*:/i.test(jsonStr);
+    }
+
+    function isRecord(value) {
+        return typeof value === 'object' && value !== null && !Array.isArray(value);
+    }
+
+    function isQuestionOption(value) {
+        return isRecord(value)
+            && typeof value.label === 'string'
+            && typeof value.description === 'string';
+    }
+
+    function isQuestionItem(value) {
+        return isRecord(value)
+            && typeof value.question === 'string'
+            && typeof value.header === 'string'
+            && Array.isArray(value.options)
+            && value.options.length > 0
+            && value.options.every(isQuestionOption);
+    }
+
+    function hasValidToolArguments(toolName, args) {
+        const normalizedToolName = toolName.trim().toLowerCase();
+        if (normalizedToolName === 'question') {
+            return isRecord(args)
+                && Array.isArray(args.questions)
+                && args.questions.length > 0
+                && args.questions.every(isQuestionItem);
+        }
+
+        if (normalizedToolName === 'ask_followup_question') {
+            return isRecord(args)
+                && typeof args.question === 'string'
+                && (!('options' in args)
+                    || (Array.isArray(args.options) && args.options.every(option => typeof option === 'string')));
+        }
+
+        return true;
+    }
+
     function looksLikeToolCallCandidate(fullBlock, jsonStr) {
         if (/^```json\s+action\b/i.test(fullBlock)) return true;
-        if (/json\s+action/i.test(fullBlock)) return true;
-        if (/"tool"\s*:/i.test(jsonStr)) return true;
-        return /"name"\s*:/i.test(jsonStr) && /"(?:parameters|arguments|input)"\s*:/i.test(jsonStr);
+        return hasToolCallSignature(jsonStr);
     }
 
     function normalizeCandidateJson(jsonStr) {
@@ -248,12 +448,43 @@ function parseToolCalls(responseText) {
         return candidates;
     }
 
+    function collectInlineJsonActionCandidates(text) {
+        const candidates = [];
+        const inlineJsonActionRegex = /json\s+action\b/gi;
+
+        for (let match = inlineJsonActionRegex.exec(text); match !== null; match = inlineJsonActionRegex.exec(text)) {
+            const start = match.index ?? 0;
+            let jsonStart = start + match[0].length;
+            while (jsonStart < text.length && /\s/.test(text[jsonStart])) jsonStart++;
+
+            const json = extractJsonValueSlice(text, jsonStart);
+            if (!json) continue;
+
+            candidates.push({
+                full: text.slice(start, jsonStart) + json,
+                json,
+                start,
+                end: jsonStart + json.length,
+            });
+        }
+
+        return candidates;
+    }
+
     function parseToolCallBlock(jsonStr) {
         const parsed = tolerantParse(jsonStr);
         if (parsed && (parsed.tool || parsed.name)) {
+            const name = parsed.tool || parsed.name || '';
+            const args = parsed.parameters || parsed.arguments || parsed.input || {};
+            if (hasMeaningfulStructuredArgumentPayload(jsonStr) && isEmptyArgumentObject(args)) {
+                return null;
+            }
+            if (!hasValidToolArguments(name, args)) {
+                return null;
+            }
             return {
-                name: parsed.tool || parsed.name || '',
-                arguments: parsed.parameters || parsed.arguments || parsed.input || {},
+                name,
+                arguments: args,
             };
         }
         return null;
@@ -268,10 +499,8 @@ function parseToolCalls(responseText) {
     for (const candidate of collectUnterminatedFenceCandidates(responseText)) {
         candidates.push(candidate);
     }
-    const inlineJsonActionRegex = /json\s+action\s*({[\s\S]*?})(?=$|\n\s*\n)/gi;
-    for (let match = inlineJsonActionRegex.exec(responseText); match !== null; match = inlineJsonActionRegex.exec(responseText)) {
-        const start = match.index ?? 0;
-        candidates.push({ full: match[0], json: match[1], start, end: start + match[0].length });
+    for (const candidate of collectInlineJsonActionCandidates(responseText)) {
+        candidates.push(candidate);
     }
     for (const candidate of collectInlineObjectCandidates(responseText)) {
         candidates.push(candidate);
@@ -288,17 +517,15 @@ function parseToolCalls(responseText) {
     for (const candidate of filtered) {
         const normalizedJson = normalizeCandidateJson(candidate.json);
         if (!looksLikeToolCallCandidate(candidate.full, normalizedJson)) continue;
-        let isToolCall = false;
         try {
             const parsed = parseToolCallBlock(normalizedJson);
             if (parsed) {
                 toolCalls.push(parsed);
-                isToolCall = true;
             }
         } catch (e) {
             console.error(`  ⚠  tolerantParse 失败:`, e.message);
         }
-        if (isToolCall) cleanText = cleanText.replace(candidate.full, '');
+        cleanText = cleanText.replace(candidate.full, '');
     }
 
     return { toolCalls, cleanText: cleanText.trim() };
@@ -575,6 +802,61 @@ test('超长 inline 工具对象不依赖正则长度限制', () => {
     const { toolCalls } = parseToolCalls(text);
     assertEqual(toolCalls.length, 1);
     assertEqual(toolCalls[0].name, 'Write');
+});
+
+test('畸形 question json action 不会拆成多个工具调用，也不会把半截块留在正文', () => {
+    const text = `Before
+json action
+{
+  "tool": "question",
+  "parameters": {
+    "questions": [
+      {
+        "question": "Q",
+        "header": "H",
+        "options":
+          {
+            "label": "A",
+            "description": "AA"
+          },
+          {
+            "label": "B",
+            "description": "BB"
+          }
+      }
+    ]
+  }
+}
+After`;
+    const { toolCalls, cleanText } = parseToolCalls(text);
+    assertEqual(toolCalls.length, 0);
+    assert(cleanText.includes('Before'), '前置正文应保留');
+    assert(cleanText.includes('After'), '后置正文应保留');
+    assert(!cleanText.includes('"tool": "question"'), '坏掉的 action 块不应残留在正文');
+    assert(!cleanText.includes('"options"'), '畸形参数片段不应残留在正文');
+});
+
+test('正文中的 json action 非工具示例不会被误删', () => {
+    const text = `The docs mention json action {"foo":"bar"} as an example.`;
+    const { toolCalls, cleanText } = parseToolCalls(text);
+    assertEqual(toolCalls.length, 0);
+    assertEqual(cleanText, text);
+});
+
+test('单引号风格的 inline 工具调用也能恢复', () => {
+    const text = `json action {'tool':'Read','parameters':{'file_path':'src/index.ts'}}`;
+    const { toolCalls, cleanText } = parseToolCalls(text);
+    assertEqual(toolCalls.length, 1);
+    assertEqual(toolCalls[0].name, 'Read');
+    assertEqual(toolCalls[0].arguments.file_path, 'src/index.ts');
+    assertEqual(cleanText, '');
+});
+
+test('ask_followup_question 的 options 必须是字符串数组', () => {
+    const text = `{"tool":"ask_followup_question","parameters":{"question":"继续吗？","options":["继续",123]}}`;
+    const { toolCalls, cleanText } = parseToolCalls(text);
+    assertEqual(toolCalls.length, 0);
+    assertEqual(cleanText, '');
 });
 
 test('hasToolCalls 与增强后的 inline 识别保持一致', () => {
