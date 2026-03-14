@@ -3,6 +3,37 @@ set -euo pipefail
 
 MODE="${1:-pm2}"
 
+wait_for_service_health() {
+    local service="$1"
+    local retries="${2:-30}"
+    local sleep_seconds="${3:-2}"
+    local container_id=""
+
+    for ((attempt=1; attempt<=retries; attempt++)); do
+        container_id="$("${COMPOSE_CMD[@]}" ps -q "$service" 2>/dev/null || true)"
+        if [[ -z "$container_id" ]]; then
+            sleep "$sleep_seconds"
+            continue
+        fi
+
+        local status
+        status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)"
+
+        if [[ "$status" == "healthy" || "$status" == "running" ]]; then
+            echo "[健康检查] 服务 $service 已就绪（$status）"
+            return 0
+        fi
+
+        sleep "$sleep_seconds"
+    done
+
+    echo "[健康检查] 服务 $service 未在预期时间内进入 healthy 状态。"
+    if [[ -n "$container_id" ]]; then
+        docker inspect --format '{{json .State.Health}}' "$container_id" 2>/dev/null || true
+    fi
+    return 1
+}
+
 if [[ "$MODE" == "docker" || "$MODE" == "--docker" ]]; then
     if ! command -v docker >/dev/null 2>&1; then
         echo "[环境检测] 未找到 docker，请先安装 Docker Engine / Docker Desktop。"
@@ -25,6 +56,13 @@ if [[ "$MODE" == "docker" || "$MODE" == "--docker" ]]; then
 
     "${COMPOSE_CMD[@]}" config >/dev/null
     "${COMPOSE_CMD[@]}" up -d --build --force-recreate --remove-orphans
+
+    echo ""
+    echo "等待服务健康检查通过..."
+    mapfile -t SERVICES < <("${COMPOSE_CMD[@]}" config --services)
+    for service in "${SERVICES[@]}"; do
+        wait_for_service_health "$service"
+    done
 
     echo ""
     echo "当前服务状态："
