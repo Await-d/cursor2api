@@ -11,6 +11,8 @@ export interface AnthropicRequest {
     temperature?: number;
     top_p?: number;
     stop_sequences?: string[];
+    _cursor2apiRetryProfile?: RetryPromptProfileId;
+    _cursor2apiRetryAttempt?: number;
 }
 
 /** tool_choice 控制模型是否必须调用工具
@@ -22,6 +24,14 @@ export type AnthropicToolChoice =
     | { type: 'auto' }
     | { type: 'any' }
     | { type: 'tool'; name: string };
+
+export type RetryPromptProfileId =
+    | 'tool_role_reset'
+    | 'tool_direct_action'
+    | 'tool_minimal_context'
+    | 'chat_role_reset'
+    | 'chat_direct_answer'
+    | 'chat_minimal_context';
 
 export interface AnthropicMessage {
     role: 'user' | 'assistant';
