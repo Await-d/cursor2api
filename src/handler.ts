@@ -16,10 +16,11 @@ import type {
     CursorSSEEvent,
     ParsedToolCall,
 } from './types.js';
-import { convertToCursorRequest, parseToolCalls, hasToolCalls } from './converter.js';
+import { convertToCursorRequest, parseToolCalls, hasToolCalls, isToolCallComplete } from './converter.js';
 import { sendCursorRequest, sendCursorRequestFull, isAbortError } from './cursor-client.js';
 import { getConfig } from './config.js';
 import { estimateAnthropicInputTokens, estimateAnthropicOutputTokens, estimateCursorInputTokens } from './token-estimator.js';
+import { extractThinking, type ThinkingBlock } from './thinking.js';
 
 function msgId(): string {
     return 'msg_' + uuidv4().replace(/-/g, '').substring(0, 24);
@@ -525,6 +526,153 @@ function cursorMessageId(): string {
     return uuidv4().replace(/-/g, '').substring(0, 16);
 }
 
+export function isTruncated(text: string): boolean {
+    if (!text || text.trim().length === 0) return false;
+
+    const trimmed = text.trimEnd();
+    if ((trimmed.match(/```/g) || []).length % 2 !== 0) return true;
+    if (hasToolCalls(trimmed) && !isToolCallComplete(trimmed)) return true;
+
+    const openTags = (trimmed.match(/^<[a-zA-Z]/gm) || []).length;
+    const closeTags = (trimmed.match(/^<\/[a-zA-Z]/gm) || []).length;
+    if (openTags > closeTags + 1) return true;
+
+    if (/[,;:\[{(]\s*$/.test(trimmed)) return true;
+    if (trimmed.length > 2000 && /\\n?\s*$/.test(trimmed) && !trimmed.endsWith('```')) return true;
+
+    return false;
+}
+
+export function deduplicateContinuation(existing: string, continuation: string): string {
+    if (!existing || !continuation) return continuation;
+
+    const maxOverlap = Math.min(500, existing.length, continuation.length);
+    if (maxOverlap < 10) return continuation;
+
+    const tail = existing.slice(-maxOverlap);
+    for (let len = maxOverlap; len >= 10; len--) {
+        const prefix = continuation.substring(0, len);
+        if (tail.endsWith(prefix)) {
+            return continuation.substring(len);
+        }
+    }
+
+    const continuationLines = continuation.split('\n');
+    const tailLines = tail.split('\n');
+    if (continuationLines.length > 0 && tailLines.length > 0) {
+        const firstContinuationLine = continuationLines[0]?.trim();
+        if (firstContinuationLine && firstContinuationLine.length >= 10) {
+            for (let index = tailLines.length - 1; index >= 0; index--) {
+                if (tailLines[index]?.trim() !== firstContinuationLine) continue;
+
+                let matchedLines = 1;
+                for (let offset = 1; offset < continuationLines.length && index + offset < tailLines.length; offset++) {
+                    if (continuationLines[offset]?.trim() === tailLines[index + offset]?.trim()) {
+                        matchedLines++;
+                    } else {
+                        break;
+                    }
+                }
+
+                if (matchedLines >= 2) {
+                    return continuationLines.slice(matchedLines).join('\n');
+                }
+
+                break;
+            }
+        }
+    }
+
+    return continuation;
+}
+
+function buildCursorFollowupRequest(cursorReq: CursorChatRequest, assistantText: string, userText: string): CursorChatRequest {
+    return {
+        ...cursorReq,
+        messages: [
+            ...cursorReq.messages,
+            {
+                id: cursorMessageId(),
+                role: 'assistant',
+                parts: [{ type: 'text', text: assistantText || '(no response)' }],
+            },
+            {
+                id: cursorMessageId(),
+                role: 'user',
+                parts: [{ type: 'text', text: userText }],
+            },
+        ],
+    };
+}
+
+async function recoverTruncatedToolResponse(
+    cursorReq: CursorChatRequest,
+    initialResponse: string,
+    signal?: AbortSignal,
+    continuationOnly = false,
+): Promise<string> {
+    let bestResponse = initialResponse;
+    let currentResponse = initialResponse;
+
+    const tierPrompts = [
+        () => `Output truncated (${currentResponse.length} chars). Split into smaller parts: use multiple Write/Edit calls (<=150 lines each) or Bash append with cat >> file <<'EOF'. Start with the first chunk now.`,
+        () => `Still truncated (${currentResponse.length} chars). Use <=80 lines per action block and continue the task immediately. Do not explain limitations; emit only the next concrete action block(s).`,
+    ];
+
+    if (!continuationOnly) {
+        for (const getPrompt of tierPrompts) {
+            const prompt = getPrompt();
+            console.log(`[Handler] 检测到截断，尝试阶梯恢复: ${prompt}`);
+            const candidate = await sendCursorRequestFull(buildCursorFollowupRequest(cursorReq, currentResponse, prompt), signal);
+
+            if (!candidate.trim()) {
+                continue;
+            }
+
+            if (isLikelyRefusal(candidate) && !hasToolCalls(candidate)) {
+                console.log('[Handler] 阶梯恢复返回拒绝样式文本，保留原始截断响应');
+                continue;
+            }
+
+            if (candidate.trim().length < Math.max(40, Math.floor(bestResponse.trim().length * 0.3)) && !hasToolCalls(candidate)) {
+                console.log('[Handler] 阶梯恢复响应明显退化，忽略本轮结果');
+                continue;
+            }
+
+            bestResponse = candidate;
+            currentResponse = candidate;
+
+            if (!isTruncated(currentResponse)) {
+                return currentResponse;
+            }
+        }
+    }
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+        const anchor = currentResponse.slice(-Math.min(300, currentResponse.length));
+        const continuationPrompt = `Output cut off. Last part:\n\`\`\`\n...${anchor}\n\`\`\`\nContinue exactly from the cut-off point. No repeats.`;
+        const continuation = await sendCursorRequestFull(buildCursorFollowupRequest(cursorReq, currentResponse, continuationPrompt), signal);
+
+        if (!continuation.trim()) {
+            break;
+        }
+
+        const dedupedContinuation = deduplicateContinuation(currentResponse, continuation);
+        if (!dedupedContinuation.trim()) {
+            break;
+        }
+
+        currentResponse += dedupedContinuation;
+        bestResponse = currentResponse;
+
+        if (!isTruncated(currentResponse)) {
+            return currentResponse;
+        }
+    }
+
+    return bestResponse;
+}
+
 export function buildToolRetryCursorRequest(cursorReq: CursorChatRequest): CursorChatRequest {
     return {
         ...cursorReq,
@@ -551,30 +699,63 @@ export async function resolveToolResponse(
     fullText: string;
     toolCalls: ParsedToolCall[];
     cleanText: string;
+    thinkingBlocks: ThinkingBlock[];
 }> {
     let fullText = initialResponse ?? '';
     if (!initialResponse) {
         fullText = await sendCursorRequestFull(cursorReq, signal);
     }
+
+    const thinkingBlocks: ThinkingBlock[] = [];
+    const maybeExtractThinking = (text: string): string => {
+        if (!getConfig().enableThinking || !text.includes('<thinking>')) {
+            return text;
+        }
+
+        const extracted = extractThinking(text);
+        thinkingBlocks.push(...extracted.thinkingBlocks);
+        return extracted.cleanText;
+    };
+
+    fullText = maybeExtractThinking(fullText);
     let parsed = parseToolCalls(fullText);
+
+    if (isTruncated(fullText)) {
+        console.log('[Handler] 初始工具响应疑似截断，优先执行阶梯恢复');
+        fullText = maybeExtractThinking(await recoverTruncatedToolResponse(cursorReq, fullText, signal, parsed.toolCalls.length > 0));
+        parsed = parseToolCalls(fullText);
+    }
 
     if (parsed.toolCalls.length === 0) {
         console.log(`[Handler] 工具调用解析失败，发送协议纠正提示重试...`);
-        fullText = await sendCursorRequestFull(buildToolRetryCursorRequest(cursorReq), signal);
+        fullText = maybeExtractThinking(await sendCursorRequestFull(buildToolRetryCursorRequest(cursorReq), signal));
         parsed = parseToolCalls(fullText);
+
+        if (isTruncated(fullText)) {
+            console.log('[Handler] 协议纠正响应仍疑似截断，再次尝试阶梯恢复');
+            fullText = maybeExtractThinking(await recoverTruncatedToolResponse(buildToolRetryCursorRequest(cursorReq), fullText, signal, parsed.toolCalls.length > 0));
+            parsed = parseToolCalls(fullText);
+        }
     }
 
     if (parsed.toolCalls.length === 0 && body) {
         console.log(`[Handler] 协议纠正后仍无工具调用（${isRefusal(fullText) ? '拒绝响应' : '纯文本'}），尝试认知重构重发...`);
         const reframed = await convertToCursorRequest(buildRetryRequest(body, 0));
-        fullText = await sendCursorRequestFull(reframed, signal);
+        fullText = maybeExtractThinking(await sendCursorRequestFull(reframed, signal));
         parsed = parseToolCalls(fullText);
+
+        if (isTruncated(fullText)) {
+            console.log('[Handler] 认知重构响应仍疑似截断，最后再尝试一次阶梯恢复');
+            fullText = maybeExtractThinking(await recoverTruncatedToolResponse(reframed, fullText, signal, parsed.toolCalls.length > 0));
+            parsed = parseToolCalls(fullText);
+        }
     }
 
     return {
         fullText,
         toolCalls: parsed.toolCalls,
         cleanText: parsed.cleanText,
+        thinkingBlocks,
     };
 }
 
@@ -612,7 +793,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
     let sentText = '';
     let blockIndex = 0;
     let textBlockStarted = false;
-    let resolvedToolResponse: { fullText: string; toolCalls: ParsedToolCall[]; cleanText: string } | null = null;
+    let resolvedToolResponse: { fullText: string; toolCalls: ParsedToolCall[]; cleanText: string; thinkingBlocks: ThinkingBlock[] } | null = null;
 
     // 无工具模式：先缓冲全部响应再检测拒绝，如果是拒绝则重试
     let activeCursorReq = cursorReq;
@@ -685,12 +866,40 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 
         // 流完成后，处理完整响应
 
-        let stopReason: AnthropicResponse['stop_reason'] = 'end_turn';
+        let thinkingBlocks: ThinkingBlock[] = [];
+        if (!hasTools && getConfig().enableThinking && fullResponse.includes('<thinking>')) {
+            const extracted = extractThinking(fullResponse);
+            thinkingBlocks = extracted.thinkingBlocks;
+            fullResponse = extracted.cleanText;
+        }
+
+        let stopReason: AnthropicResponse['stop_reason'] = isTruncated(fullResponse) ? 'max_tokens' : 'end_turn';
         let estimatedOutputTokens = 1;
 
         if (hasTools) {
-            let { toolCalls, cleanText } = resolvedToolResponse!;
+            let { toolCalls, cleanText, thinkingBlocks: resolvedThinkingBlocks } = resolvedToolResponse!;
+            thinkingBlocks = resolvedThinkingBlocks;
             const usageBlocks: AnthropicContentBlock[] = [];
+
+            for (const thinkingBlock of thinkingBlocks) {
+                usageBlocks.push({ type: 'thinking', thinking: thinkingBlock.thinking, signature: 'cursor2api-thinking' });
+                writeSSE(res, 'content_block_start', {
+                    type: 'content_block_start', index: blockIndex,
+                    content_block: { type: 'thinking', thinking: '' },
+                });
+                writeSSE(res, 'content_block_delta', {
+                    type: 'content_block_delta', index: blockIndex,
+                    delta: { type: 'thinking_delta', thinking: thinkingBlock.thinking },
+                });
+                writeSSE(res, 'content_block_delta', {
+                    type: 'content_block_delta', index: blockIndex,
+                    delta: { type: 'signature_delta', signature: 'cursor2api-thinking' },
+                });
+                writeSSE(res, 'content_block_stop', {
+                    type: 'content_block_stop', index: blockIndex,
+                });
+                blockIndex++;
+            }
 
             // ★ tool_choice=any 强制重试：如果模型没有输出任何工具调用块，追加强制消息重试
             const toolChoice = body.tool_choice;
@@ -800,6 +1009,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 
                 estimatedOutputTokens = estimateAnthropicOutputTokens(usageBlocks);
             } else {
+                stopReason = isTruncated(fullResponse) ? 'max_tokens' : 'end_turn';
                 let textToSend = sanitizeResponse(fullResponse);
 
                 if (isRefusal(fullResponse)) {
@@ -825,9 +1035,31 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         } else {
             // 无工具模式 — 缓冲后统一发送（已经过拒绝检测+重试）
             // 最后一道防线：清洗所有 Cursor 身份引用
+            const usageBlocks: AnthropicContentBlock[] = [];
+            for (const thinkingBlock of thinkingBlocks) {
+                usageBlocks.push({ type: 'thinking', thinking: thinkingBlock.thinking, signature: 'cursor2api-thinking' });
+                writeSSE(res, 'content_block_start', {
+                    type: 'content_block_start', index: blockIndex,
+                    content_block: { type: 'thinking', thinking: '' },
+                });
+                writeSSE(res, 'content_block_delta', {
+                    type: 'content_block_delta', index: blockIndex,
+                    delta: { type: 'thinking_delta', thinking: thinkingBlock.thinking },
+                });
+                writeSSE(res, 'content_block_delta', {
+                    type: 'content_block_delta', index: blockIndex,
+                    delta: { type: 'signature_delta', signature: 'cursor2api-thinking' },
+                });
+                writeSSE(res, 'content_block_stop', {
+                    type: 'content_block_stop', index: blockIndex,
+                });
+                blockIndex++;
+            }
+
             const sanitized = sanitizeResponse(fullResponse);
             if (sanitized) {
-                estimatedOutputTokens = estimateAnthropicOutputTokens([{ type: 'text', text: sanitized }]);
+                usageBlocks.push({ type: 'text', text: sanitized });
+                estimatedOutputTokens = estimateAnthropicOutputTokens(usageBlocks);
                 if (!textBlockStarted) {
                     writeSSE(res, 'content_block_start', {
                         type: 'content_block_start', index: blockIndex,
@@ -910,12 +1142,21 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
     }
 
     const contentBlocks: AnthropicContentBlock[] = [];
-    let stopReason: AnthropicResponse['stop_reason'] = 'end_turn';
+    let stopReason: AnthropicResponse['stop_reason'] = isTruncated(fullText) ? 'max_tokens' : 'end_turn';
+    let thinkingBlocks: ThinkingBlock[] = [];
+
+    if (!hasTools && getConfig().enableThinking && fullText.includes('<thinking>')) {
+        const extracted = extractThinking(fullText);
+        thinkingBlocks = extracted.thinkingBlocks;
+        fullText = extracted.cleanText;
+        stopReason = isTruncated(fullText) ? 'max_tokens' : 'end_turn';
+    }
 
     if (hasTools) {
         const resolved = await resolveToolResponse(activeCursorReq, fullText, body, signal);
         fullText = resolved.fullText;
-        let { toolCalls, cleanText } = resolved;
+        let { toolCalls, cleanText, thinkingBlocks: resolvedThinkingBlocks } = resolved;
+        thinkingBlocks = resolvedThinkingBlocks;
 
         if (toolCalls.length > 0) {
             stopReason = 'tool_use';
@@ -940,6 +1181,7 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
                 });
             }
         } else {
+            stopReason = isTruncated(fullText) ? 'max_tokens' : 'end_turn';
             const textToSend = sanitizeResponse(fullText);
             if (isRefusal(fullText)) {
                 console.log(`[Handler] Refusal detected in tool-enabled non-stream response with no tool calls — sanitized and forwarding: ${fullText.substring(0, 100)}...`);
@@ -949,6 +1191,10 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
     } else {
         // 最后一道防线：清洗所有 Cursor 身份引用
         contentBlocks.push({ type: 'text', text: sanitizeResponse(fullText) });
+    }
+
+    if (thinkingBlocks.length > 0) {
+        contentBlocks.unshift(...thinkingBlocks.map(block => ({ type: 'thinking' as const, thinking: block.thinking, signature: 'cursor2api-thinking' })));
     }
 
     const estimatedInputTokens = estimateCursorInputTokens(activeCursorReq);
