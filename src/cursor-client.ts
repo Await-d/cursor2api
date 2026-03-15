@@ -10,34 +10,161 @@ const CURSOR_CHAT_API_PATH = '/api/chat';
 
 let proxyIndex = 0;
 
-/** 记录最近连接失败的代理（ECONNREFUSED 等网络错误），value = 失败时间戳 */
-const deadProxies = new Map<string, number>();
-/** 代理被标记为死亡后的冷却时间（ms），过后重新尝试 */
-const DEAD_PROXY_COOLDOWN = 300_000;
+interface ProxyRuntimeState {
+    status: 'healthy' | 'paused';
+    pausedUntil: number;
+    consecutiveFailures: number;
+    lastCheckedAt: number;
+    lastSuccessAt: number;
+    lastFailureAt: number;
+    lastReason?: string;
+}
 
-function nextProxyUrl(): string | null {
+const proxyStates = new Map<string, ProxyRuntimeState>();
+
+let directCooldownUntil = 0;
+let healthCheckTimer: ReturnType<typeof setInterval> | null = null;
+let healthCheckRunning = false;
+let lastNoHealthyProxyLogAt = 0;
+let lastDirectCooldownLogAt = 0;
+
+function getOrInitProxyState(proxyUrl: string): ProxyRuntimeState {
+    const existing = proxyStates.get(proxyUrl);
+    if (existing) return existing;
+
+    const next: ProxyRuntimeState = {
+        status: 'healthy',
+        pausedUntil: 0,
+        consecutiveFailures: 0,
+        lastCheckedAt: 0,
+        lastSuccessAt: 0,
+        lastFailureAt: 0,
+    };
+    proxyStates.set(proxyUrl, next);
+    return next;
+}
+
+function syncProxyStates(pool: string[]): void {
+    const alive = new Set(pool);
+    for (const proxyUrl of pool) {
+        getOrInitProxyState(proxyUrl);
+    }
+    for (const proxyUrl of proxyStates.keys()) {
+        if (!alive.has(proxyUrl)) {
+            proxyStates.delete(proxyUrl);
+        }
+    }
+}
+
+function normalizeDirectCooldownMs(retryAfterMs: number): number {
+    const config = getConfig();
+    const raw = retryAfterMs > 0 ? retryAfterMs : config.direct429CooldownMs;
+    const minApplied = Math.max(raw, config.direct429CooldownMs);
+    const cap = Math.max(config.maxRetryDelay, config.direct429CooldownMs);
+    return Math.min(minApplied, cap);
+}
+
+function getDirectCooldownRemainingMs(now = Date.now()): number {
+    return Math.max(0, directCooldownUntil - now);
+}
+
+function logDirectCooldownRouting(remainingMs: number): void {
+    const now = Date.now();
+    if (now - lastDirectCooldownLogAt < 5_000) return;
+    lastDirectCooldownLogAt = now;
+    console.warn(`[Cursor] 直连冷却中（剩余 ${Math.ceil(remainingMs / 1000)}s），优先切换代理`);
+}
+
+function markDirectRateLimited(retryAfterMs: number): number {
+    const now = Date.now();
+    const cooldownMs = normalizeDirectCooldownMs(retryAfterMs);
+    const nextUntil = now + cooldownMs;
+    if (nextUntil > directCooldownUntil) {
+        directCooldownUntil = nextUntil;
+    }
+    const remaining = getDirectCooldownRemainingMs(now);
+    console.warn(`[Cursor] 直连触发 429，暂停直连 ${Math.ceil(remaining / 1000)}s，期间改走代理`);
+    return remaining;
+}
+
+function computeProxyPauseMs(consecutiveFailures: number): number {
+    const config = getConfig();
+    const exp = Math.max(0, Math.min(consecutiveFailures - 1, 6));
+    const raw = Math.min(config.proxyPauseBaseMs * Math.pow(2, exp), config.proxyPauseMaxMs);
+    const jitter = raw * 0.2 * (Math.random() * 2 - 1);
+    const value = raw + jitter;
+    return Math.round(Math.max(config.proxyPauseBaseMs, Math.min(config.proxyPauseMaxMs, value)));
+}
+
+function markProxyPaused(proxyUrl: string, reason: string, explicitPauseMs?: number): void {
+    const state = getOrInitProxyState(proxyUrl);
+    const now = Date.now();
+    state.consecutiveFailures += 1;
+    state.lastFailureAt = now;
+    state.lastReason = reason;
+    state.status = 'paused';
+
+    const pauseMs = explicitPauseMs && explicitPauseMs > 0
+        ? Math.min(explicitPauseMs, getConfig().proxyPauseMaxMs)
+        : computeProxyPauseMs(state.consecutiveFailures);
+    const nextPausedUntil = now + pauseMs;
+    if (nextPausedUntil > state.pausedUntil) {
+        state.pausedUntil = nextPausedUntil;
+    }
+
+    const remaining = Math.max(0, state.pausedUntil - now);
+    console.warn(`[Cursor] 代理暂停 ${Math.ceil(remaining / 1000)}s: ${proxyUrl} (${reason})`);
+}
+
+function markProxyHealthy(proxyUrl: string, reason: string, observedAt = Date.now()): void {
+    const state = getOrInitProxyState(proxyUrl);
+    const now = Date.now();
+
+    if (state.lastFailureAt > observedAt) {
+        return;
+    }
+
+    const wasPaused = state.status === 'paused' || state.pausedUntil > now;
+
+    state.status = 'healthy';
+    state.pausedUntil = 0;
+    state.consecutiveFailures = 0;
+    state.lastSuccessAt = now;
+    state.lastReason = undefined;
+
+    if (wasPaused) {
+        console.log(`[Cursor] 代理恢复可用: ${proxyUrl} (${reason})`);
+    }
+}
+
+function isProxyAvailable(proxyUrl: string, now = Date.now()): boolean {
+    const state = getOrInitProxyState(proxyUrl);
+    return state.pausedUntil <= now;
+}
+
+function nextProxyUrl(excluded = new Set<string>()): string | null {
     const pool = getConfig().proxyPool;
     if (!pool || pool.length === 0) return null;
 
+    syncProxyStates(pool);
     const now = Date.now();
-    // 尝试找到一个存活的代理，最多检查 pool.length 次
+
     for (let i = 0; i < pool.length; i++) {
         const url = pool[proxyIndex % pool.length];
         proxyIndex++;
-        const deadAt = deadProxies.get(url);
-        if (!deadAt || now - deadAt > DEAD_PROXY_COOLDOWN) {
-            deadProxies.delete(url);
+        if (excluded.has(url)) {
+            continue;
+        }
+        if (isProxyAvailable(url, now)) {
             return url;
         }
     }
-    // 所有代理都在冷却期内，回退直连
-    console.warn('[Cursor] 所有代理均不可用，回退直连');
-    return null;
-}
 
-function markProxyDead(proxyUrl: string): void {
-    deadProxies.set(proxyUrl, Date.now());
-    console.warn(`[Cursor] 代理标记为不可用 (${DEAD_PROXY_COOLDOWN / 1000}s 冷却): ${proxyUrl}`);
+    if (now - lastNoHealthyProxyLogAt > 5_000) {
+        lastNoHealthyProxyLogAt = now;
+        console.warn('[Cursor] 当前无可用代理（均处于暂停状态）');
+    }
+    return null;
 }
 
 function isConnectionError(err: unknown): boolean {
@@ -146,13 +273,172 @@ function parseRetryAfterMs(value: string | string[] | undefined): number {
     return 0;
 }
 
+function summarizeError(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+}
+
+function isHealthyProbeStatus(statusCode: number, locationHeader: string | string[] | undefined): boolean {
+    if (statusCode >= 200 && statusCode < 300) {
+        return true;
+    }
+
+    if (statusCode >= 300 && statusCode < 400) {
+        const location = Array.isArray(locationHeader) ? locationHeader[0] : locationHeader;
+        if (!location) return false;
+        if (location.startsWith('/')) {
+            return true;
+        }
+        try {
+            const target = new URL(location);
+            return target.hostname === CURSOR_CHAT_API_HOST;
+        } catch {
+            return false;
+        }
+    }
+
+    return false;
+}
+
+function pauseProxyFromRequestError(proxyUrl: string, err: unknown): void {
+    if (err instanceof RateLimitError) {
+        const pauseMs = normalizeDirectCooldownMs(err.retryAfterMs);
+        markProxyPaused(proxyUrl, 'HTTP 429', pauseMs);
+        return;
+    }
+
+    if (isProxyBlockedError(err)) {
+        markProxyPaused(proxyUrl, 'Security Checkpoint');
+        return;
+    }
+
+    if (isConnectionError(err)) {
+        markProxyPaused(proxyUrl, '连接错误');
+        return;
+    }
+
+    markProxyPaused(proxyUrl, '请求失败');
+}
+
+async function probeProxy(proxyUrl: string): Promise<{ ok: boolean; reason?: string }> {
+    const config = getConfig();
+    const agent = makeAgent(proxyUrl);
+
+    return new Promise((resolve) => {
+        let settled = false;
+        const done = (ok: boolean, reason?: string) => {
+            if (settled) return;
+            settled = true;
+            resolve({ ok, reason });
+        };
+
+        const requestOptions: https.RequestOptions = {
+            hostname: CURSOR_CHAT_API_HOST,
+            path: '/',
+            method: 'GET',
+            headers: {
+                'user-agent': config.fingerprint.userAgent,
+                'accept': '*/*',
+            },
+            ...(agent ? { agent } : {}),
+        };
+
+        const reqHttp = https.request(requestOptions, (res) => {
+            const statusCode = res.statusCode ?? 0;
+            res.resume();
+
+            if (isHealthyProbeStatus(statusCode, res.headers.location)) {
+                done(true);
+                return;
+            }
+            done(false, `HTTP ${statusCode}`);
+        });
+
+        reqHttp.setTimeout(config.proxyProbeTimeoutMs, () => {
+            done(false, `timeout ${config.proxyProbeTimeoutMs}ms`);
+            reqHttp.destroy();
+        });
+
+        reqHttp.on('error', (err) => {
+            done(false, summarizeError(err));
+        });
+
+        reqHttp.end();
+    });
+}
+
+async function runProxyHealthChecks(): Promise<void> {
+    if (healthCheckRunning) return;
+    healthCheckRunning = true;
+
+    try {
+        const pool = getConfig().proxyPool;
+        if (!pool.length) return;
+
+        syncProxyStates(pool);
+        const now = Date.now();
+
+        await Promise.all(pool.map(async (proxyUrl) => {
+            const state = getOrInitProxyState(proxyUrl);
+            if (state.pausedUntil > now) {
+                return;
+            }
+
+            const probeStartedAt = Date.now();
+            const result = await probeProxy(proxyUrl);
+            state.lastCheckedAt = Date.now();
+
+            if (result.ok) {
+                markProxyHealthy(proxyUrl, 'health-check', probeStartedAt);
+                return;
+            }
+
+            markProxyPaused(proxyUrl, `health-check:${result.reason ?? 'unreachable'}`);
+        }));
+    } catch (err) {
+        console.warn(`[Cursor] 代理健康检查异常: ${summarizeError(err)}`);
+    } finally {
+        healthCheckRunning = false;
+    }
+}
+
+function ensureProxyHealthChecker(): void {
+    const pool = getConfig().proxyPool;
+    if (!pool.length) {
+        if (healthCheckTimer) {
+            clearInterval(healthCheckTimer);
+            healthCheckTimer = null;
+        }
+        return;
+    }
+
+    syncProxyStates(pool);
+
+    if (healthCheckTimer) return;
+
+    const intervalMs = Math.max(5_000, getConfig().proxyHealthCheckIntervalMs);
+    healthCheckTimer = setInterval(() => {
+        void runProxyHealthChecks();
+    }, intervalMs);
+
+    if (typeof healthCheckTimer.unref === 'function') {
+        healthCheckTimer.unref();
+    }
+
+    console.log(`[Cursor] 启动代理健康检查，间隔 ${Math.round(intervalMs / 1000)}s`);
+    void runProxyHealthChecks();
+}
+
 export async function sendCursorRequest(
     req: CursorChatRequest,
     onChunk: (event: CursorSSEEvent) => void,
     signal?: AbortSignal,
 ): Promise<void> {
+    const MAX_429_RETRIES = 12;
     const queue = getQueue();
     const config = getConfig();
+    if (config.proxyPool.length > 0) {
+        ensureProxyHealthChecker();
+    }
     let attempt429 = 0;
 
     while (true) {
@@ -174,6 +460,9 @@ export async function sendCursorRequest(
             }
 
             attempt429++;
+            if (attempt429 > MAX_429_RETRIES) {
+                throw new Error(`Cursor API 429 重试达到上限 (${MAX_429_RETRIES})`);
+            }
             const retryAfterMs = err instanceof RateLimitError ? err.retryAfterMs : 0;
             const cappedRetryAfterMs = retryAfterMs > 0 ? Math.min(retryAfterMs, config.maxRetryDelay) : 0;
             const backoffDelay = RequestQueue.computeRetryDelay(attempt429, config.retryDelay, config.maxRetryDelay);
@@ -190,54 +479,127 @@ async function sendCursorRequestWithProxyRetries(
     onChunk: (event: CursorSSEEvent) => void,
     signal?: AbortSignal,
 ): Promise<void> {
-    const maxRetries = 3;
-    let lastError: unknown;
+    const pool = getConfig().proxyPool;
+    if (pool.length > 0) {
+        ensureProxyHealthChecker();
+    }
 
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        if (signal?.aborted) {
-            throw new RequestAbortedError();
+    let lastError: unknown;
+    let sawRateLimit = false;
+    let maxRetryAfterMs = 0;
+
+    const tryProxyPool = async (): Promise<boolean> => {
+        if (pool.length === 0) return false;
+
+        const attemptedProxies = new Set<string>();
+        const maxRetries = Math.max(1, pool.length);
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            if (signal?.aborted) {
+                throw new RequestAbortedError();
+            }
+
+            const proxyUrl = nextProxyUrl(attemptedProxies);
+            if (!proxyUrl) break;
+            attemptedProxies.add(proxyUrl);
+
+            try {
+                await sendCursorRequestInner(req, onChunk, makeAgent(proxyUrl), proxyUrl, signal);
+                markProxyHealthy(proxyUrl, 'request-success');
+                return true;
+            } catch (err) {
+                lastError = err;
+
+                if (err instanceof RequestAbortedError) {
+                    throw err;
+                }
+
+                if (err instanceof RateLimitError) {
+                    sawRateLimit = true;
+                    maxRetryAfterMs = Math.max(maxRetryAfterMs, normalizeDirectCooldownMs(err.retryAfterMs));
+                }
+
+                pauseProxyFromRequestError(proxyUrl, err);
+                console.error(`[Cursor] 代理请求失败 (${attempt}/${maxRetries}) [${proxyUrl}]: ${summarizeError(err)}`);
+
+                if (attempt < maxRetries) {
+                    await new Promise(r => setTimeout(r, 500));
+                }
+            }
         }
-        const proxyUrl = nextProxyUrl();
-        const agent = makeAgent(proxyUrl);
+
+        return false;
+    };
+
+    const directCooldownRemaining = getDirectCooldownRemainingMs();
+    if (directCooldownRemaining === 0) {
         try {
-            await sendCursorRequestInner(req, onChunk, agent, proxyUrl, signal);
+            await sendCursorRequestInner(req, onChunk, undefined, null, signal);
             return;
         } catch (err) {
             lastError = err;
 
-            if (err instanceof RateLimitError) {
-                throw err;
-            }
             if (err instanceof RequestAbortedError) {
                 throw err;
             }
 
-            if (proxyUrl && (isConnectionError(err) || isProxyBlockedError(err))) {
-                markProxyDead(proxyUrl);
+            if (err instanceof RateLimitError) {
+                sawRateLimit = true;
+                const remaining = markDirectRateLimited(err.retryAfterMs);
+                maxRetryAfterMs = Math.max(maxRetryAfterMs, remaining);
+
+                const proxied = await tryProxyPool();
+                if (proxied) return;
+
+                throw new RateLimitError(Math.max(maxRetryAfterMs, getDirectCooldownRemainingMs()));
             }
 
-            const msg = err instanceof Error ? err.message : String(err);
-            console.error(`[Cursor] 请求失败 (${attempt}/${maxRetries}): ${msg}`);
-            if (attempt < maxRetries) {
-                await new Promise(r => setTimeout(r, 1000));
+            if (pool.length > 0) {
+                console.warn(`[Cursor] 直连请求失败，尝试代理兜底: ${summarizeError(err)}`);
+                const proxied = await tryProxyPool();
+                if (proxied) return;
             }
+
+            throw err;
         }
     }
 
-    const pool = getConfig().proxyPool;
-    if (pool && pool.length > 0) {
-        console.warn('[Cursor] 所有代理重试失败，最终尝试直连...');
+    logDirectCooldownRouting(directCooldownRemaining);
+    const proxied = await tryProxyPool();
+    if (proxied) return;
+
+    const remainingAfterProxy = getDirectCooldownRemainingMs();
+    if (remainingAfterProxy === 0) {
         try {
             await sendCursorRequestInner(req, onChunk, undefined, null, signal);
             return;
-        } catch (directErr) {
-            const msg = directErr instanceof Error ? directErr.message : String(directErr);
-            console.error(`[Cursor] 直连也失败: ${msg}`);
-            throw directErr;
+        } catch (err) {
+            lastError = err;
+
+            if (err instanceof RequestAbortedError) {
+                throw err;
+            }
+
+            if (err instanceof RateLimitError) {
+                sawRateLimit = true;
+                const remaining = markDirectRateLimited(err.retryAfterMs);
+                maxRetryAfterMs = Math.max(maxRetryAfterMs, remaining);
+            } else {
+                throw err;
+            }
         }
     }
 
-    throw lastError;
+    const directCooldownRemainingNow = getDirectCooldownRemainingMs();
+
+    if (sawRateLimit || directCooldownRemainingNow > 0) {
+        throw new RateLimitError(Math.max(maxRetryAfterMs, directCooldownRemainingNow));
+    }
+
+    if (lastError) {
+        throw lastError;
+    }
+
+    throw new Error('No available upstream route: direct cooling down and no healthy proxy');
 }
 
 async function sendCursorRequestInner(
@@ -250,6 +612,9 @@ async function sendCursorRequestInner(
     const headers = getChromeHeaders();
     const body = JSON.stringify(req);
     const config = getConfig();
+    const timeoutSeconds = Number.isFinite(config.timeout) ? config.timeout : 120;
+    const idleTimeoutMs = Math.max(1_000, Math.round(timeoutSeconds * 1000));
+    const connectTimeoutMs = Math.max(2_000, idleTimeoutMs * 2);
 
     console.log(`[Cursor] 发送请求: model=${req.model}, messages=${req.messages.length}${proxyUrl ? ` [proxy=${proxyUrl}]` : ''}`);
 
@@ -258,23 +623,37 @@ async function sendCursorRequestInner(
             reject(new RequestAbortedError());
             return;
         }
+
         let idleTimer: ReturnType<typeof setTimeout> | null = null;
         let connectTimer: ReturnType<typeof setTimeout> | null = null;
+        let settled = false;
+        let abortHandler: (() => void) | null = null;
 
         const clearIdle = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } };
         const clearConnect = () => { if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; } };
-        const resetIdleTimer = () => {
+
+        const cleanup = () => {
             clearIdle();
-            idleTimer = setTimeout(() => {
-                console.warn(`[Cursor] 空闲超时（${config.timeout}s 无新数据），中止请求`);
-                reject(new Error('Cursor API 空闲超时'));
-            }, config.timeout * 1000);
+            clearConnect();
+            if (signal && abortHandler) {
+                signal.removeEventListener('abort', abortHandler);
+                abortHandler = null;
+            }
         };
 
-        connectTimer = setTimeout(() => {
-            console.warn(`[Cursor] 连接超时（${config.timeout * 2}s 未收到响应头），中止请求`);
-            reject(new Error('Cursor API 连接超时'));
-        }, config.timeout * 2 * 1000);
+        const settleResolve = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve();
+        };
+
+        const settleReject = (error: unknown) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(error);
+        };
 
         const options: https.RequestOptions = {
             hostname: CURSOR_CHAT_API_HOST,
@@ -288,30 +667,54 @@ async function sendCursorRequestInner(
         };
 
         const reqHttp = https.request(options, (res) => {
+            if (settled) {
+                res.resume();
+                return;
+            }
+
             clearConnect();
 
             if (res.statusCode === 429) {
-
                 clearIdle();
-
                 const waitMs = parseRetryAfterMs(res.headers['retry-after']);
                 res.resume();
-                reject(new RateLimitError(waitMs));
+                settleReject(new RateLimitError(waitMs));
                 return;
             }
 
             if (!res.statusCode || res.statusCode >= 300) {
-
                 clearIdle();
-
                 let errBody = '';
-                res.on('data', (chunk: Buffer) => { errBody += chunk.toString(); });
-                res.on('end', () => reject(new Error(`Cursor API 错误: HTTP ${res.statusCode} - ${errBody}`)));
+                res.on('data', (chunk: Buffer) => {
+                    if (settled) return;
+                    errBody += chunk.toString();
+                });
+                res.on('end', () => {
+                    if (settled) return;
+                    settleReject(new Error(`Cursor API 错误: HTTP ${res.statusCode} - ${errBody}`));
+                });
+                res.on('error', (err) => {
+                    settleReject(err);
+                });
                 return;
             }
 
+            const resetIdleTimer = () => {
+                clearIdle();
+                idleTimer = setTimeout(() => {
+                    const timeoutError = new Error('Cursor API 空闲超时');
+                    console.warn(`[Cursor] 空闲超时（${Math.round(idleTimeoutMs / 1000)}s 无新数据），中止请求`);
+                    if (!reqHttp.destroyed) {
+                        reqHttp.destroy(timeoutError);
+                    }
+                    settleReject(timeoutError);
+                }, idleTimeoutMs);
+            };
+
+            clearIdle();
             let buffer = '';
             res.on('data', (chunk: Buffer) => {
+                if (settled) return;
                 resetIdleTimer();
                 buffer += chunk.toString();
                 const lines = buffer.split('\n');
@@ -328,9 +731,7 @@ async function sendCursorRequestInner(
             });
 
             res.on('end', () => {
-
-                clearIdle();
-                clearConnect();
+                if (settled) return;
 
                 if (buffer.startsWith('data: ')) {
                     const data = buffer.slice(6).trim();
@@ -338,39 +739,43 @@ async function sendCursorRequestInner(
                         try { onChunk(JSON.parse(data) as CursorSSEEvent); } catch { }
                     }
                 }
-                resolve();
+                settleResolve();
             });
 
             res.on('error', (err) => {
-
-                clearIdle();
-                clearConnect();
-
-                reject(err);
+                settleReject(err);
             });
+
+            resetIdleTimer();
         });
 
+        connectTimer = setTimeout(() => {
+            const timeoutError = new Error('Cursor API 连接超时');
+            console.warn(`[Cursor] 连接超时（${Math.round(connectTimeoutMs / 1000)}s 未收到响应头），中止请求`);
+            if (!reqHttp.destroyed) {
+                reqHttp.destroy(timeoutError);
+            }
+            settleReject(timeoutError);
+        }, connectTimeoutMs);
+
         if (signal) {
-            const onAbort = () => {
-                clearIdle();
-                clearConnect();
-                reqHttp.destroy(new RequestAbortedError());
+            abortHandler = () => {
+                const abortError = new RequestAbortedError();
+                if (!reqHttp.destroyed) {
+                    reqHttp.destroy(abortError);
+                }
+                settleReject(abortError);
             };
             if (signal.aborted) {
-                onAbort();
+                abortHandler();
                 return;
             }
-            signal.addEventListener('abort', onAbort, { once: true });
+            signal.addEventListener('abort', abortHandler, { once: true });
         }
 
         reqHttp.on('error', (err) => {
-
-            clearIdle();
-            clearConnect();
-
-            reject(err);
+            settleReject(err);
         });
-
 
         reqHttp.write(body);
         reqHttp.end();
