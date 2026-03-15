@@ -1,5 +1,6 @@
 import { buildRetryRequest } from '../src/handler.ts';
 import { convertToCursorRequest } from '../src/converter.ts';
+import { getConfig } from '../src/config.ts';
 
 let passed = 0;
 let failed = 0;
@@ -205,6 +206,23 @@ await test('retry conversion sanitizes retry system prompt', async () => {
     assert(!/\bread_(?:file|dir)\b/i.test(firstPrompt), 'retry prompt should rewrite read_file/read_dir tool names');
     assert(!/\bSisyphus\b/i.test(firstPrompt), 'retry prompt should sanitize Sisyphus references');
     assert(firstPrompt.includes('Task guidance:'), 'retry prompt should keep sanitized task guidance');
+});
+
+await test('retry conversion keeps injected system prompt guidance', async () => {
+    const config = getConfig();
+    const previousInject = config.systemPromptInject;
+    config.systemPromptInject = 'Always keep custom project guardrails on retries.';
+
+    try {
+        const request = buildToolRequest(2, 200);
+        const retryRequest = buildRetryRequest(request, 0);
+        const cursorReq = await convertToCursorRequest(retryRequest);
+        const firstPrompt = cursorReq.messages[0]?.parts[0]?.text || '';
+
+        assert(firstPrompt.includes('Always keep custom project guardrails on retries.'), 'retry prompt should keep injected system prompt guidance');
+    } finally {
+        config.systemPromptInject = previousInject;
+    }
 });
 
 await test('minimal-context retry drops original system guidance', async () => {
