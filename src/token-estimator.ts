@@ -157,6 +157,11 @@ export function estimateAnthropicOutputTokens(blocks: AnthropicContentBlock[]): 
             continue;
         }
 
+        if (block.type === 'thinking' && typeof block.thinking === 'string') {
+            total += estimateTextTokens(block.thinking);
+            continue;
+        }
+
         if (block.type === 'tool_use') {
             total += estimateTextTokens(JSON.stringify(block.input || {}));
             if (block.name) total += estimateTextTokens(block.name);
@@ -186,8 +191,13 @@ export function estimateCursorInputTokens(req: CursorChatRequest): number {
 export function estimateOpenAICompletionTokens(
     content: string | null,
     toolCalls?: Array<{ function: { arguments: string; name?: string } }>,
+    reasoningContent?: string | null,
 ): number {
     let total = content ? estimateTextTokens(content) : 0;
+
+    if (reasoningContent) {
+        total += estimateTextTokens(reasoningContent);
+    }
 
     for (const toolCall of toolCalls ?? []) {
         if (toolCall.function.name) {

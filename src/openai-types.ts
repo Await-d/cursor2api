@@ -20,6 +20,7 @@ export interface OpenAIMessage {
     role: 'system' | 'user' | 'assistant' | 'tool';
     content: string | OpenAIContentPart[] | null;
     name?: string;
+    reasoning_content?: string | null;
     // assistant tool_calls
     tool_calls?: OpenAIToolCall[];
     // tool result
@@ -27,8 +28,9 @@ export interface OpenAIMessage {
 }
 
 export interface OpenAIContentPart {
-    type: 'text' | 'image_url';
+    type: 'text' | 'image_url' | 'reasoning' | 'reasoning_content' | 'input_text' | 'output_text';
     text?: string;
+    reasoning?: string;
     image_url?: { url: string; detail?: string };
 }
 
@@ -70,6 +72,7 @@ export interface OpenAIChatChoice {
     message: {
         role: 'assistant';
         content: string | null;
+        reasoning_content?: string;
         tool_calls?: OpenAIToolCall[];
     };
     finish_reason: 'stop' | 'tool_calls' | 'length' | null;
@@ -91,6 +94,7 @@ export interface OpenAIStreamChoice {
     delta: {
         role?: 'assistant';
         content?: string | null;
+        reasoning_content?: string;
         tool_calls?: OpenAIStreamToolCall[];
     };
     finish_reason: 'stop' | 'tool_calls' | 'length' | null;

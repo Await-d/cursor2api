@@ -26,7 +26,9 @@ import type {
 } from './types.js';
 import { convertToCursorRequest, parseToolCalls, hasToolCalls } from './converter.js';
 import { sendCursorRequest, sendCursorRequestFull, isAbortError } from './cursor-client.js';
+import { getConfig } from './config.js';
 import { estimateCursorInputTokens, estimateOpenAICompletionTokens } from './token-estimator.js';
+import { extractThinking } from './thinking.js';
 import {
     isRefusal,
     sanitizeResponse,
@@ -36,6 +38,8 @@ import {
     CLAUDE_IDENTITY_RESPONSE,
     CLAUDE_TOOLS_RESPONSE,
     MAX_REFUSAL_RETRIES,
+    resolveToolResponse,
+    isTruncated,
 } from './handler.js';
 
 function chatId(): string {
@@ -98,6 +102,9 @@ function convertToAnthropicRequest(body: OpenAIChatRequest): AnthropicRequest {
 
             case 'assistant': {
                 const blocks: AnthropicContentBlock[] = [];
+                if (typeof msg.reasoning_content === 'string' && msg.reasoning_content.trim()) {
+                    blocks.push({ type: 'thinking', thinking: msg.reasoning_content.trim(), signature: 'openai-reasoning' });
+                }
                 const contentBlocks = extractOpenAIContentBlocks(msg);
                 if (typeof contentBlocks === 'string' && contentBlocks) {
                     blocks.push({ type: 'text', text: contentBlocks });
@@ -223,6 +230,11 @@ function extractOpenAIContentBlocks(msg: OpenAIMessage): string | AnthropicConte
         for (const p of msg.content as (OpenAIContentPart | Record<string, unknown>)[]) {
             if (p.type === 'text' && (p as OpenAIContentPart).text) {
                 blocks.push({ type: 'text', text: (p as OpenAIContentPart).text! });
+            } else if (p.type === 'reasoning' || p.type === 'reasoning_content') {
+                const reasoningText = (p as OpenAIContentPart).text || (p as OpenAIContentPart).reasoning;
+                if (reasoningText) {
+                    blocks.push({ type: 'thinking', thinking: reasoningText, signature: 'openai-reasoning' });
+                }
             } else if (p.type === 'image_url' && (p as OpenAIContentPart).image_url?.url) {
                 const url = (p as OpenAIContentPart).image_url!.url;
                 if (url.startsWith('data:')) {
@@ -434,12 +446,31 @@ async function handleOpenAIStream(
             await executeStream();
         }
 
-        let finishReason: 'stop' | 'tool_calls' = 'stop';
+        const config = getConfig();
+        let finishReason: 'stop' | 'tool_calls' | 'length' = isTruncated(fullResponse) ? 'length' : 'stop';
         let completionContent = '';
+        let completionReasoningContent: string | undefined;
         let completionToolCalls: OpenAIToolCall[] | undefined;
 
-        if (hasTools && hasToolCalls(fullResponse)) {
-            const { toolCalls, cleanText } = parseToolCalls(fullResponse);
+        if (hasTools) {
+            const resolved = await resolveToolResponse(activeCursorReq, fullResponse, anthropicReq, signal);
+            fullResponse = resolved.fullText;
+            completionReasoningContent = resolved.thinkingBlocks.length > 0
+                ? resolved.thinkingBlocks.map(block => block.thinking).join('\n\n')
+                : undefined;
+
+            if (completionReasoningContent) {
+                writeOpenAISSE(res, {
+                    id, object: 'chat.completion.chunk', created, model,
+                    choices: [{
+                        index: 0,
+                        delta: { reasoning_content: completionReasoningContent },
+                        finish_reason: null,
+                    }],
+                });
+            }
+
+            const { toolCalls, cleanText } = resolved;
 
             if (toolCalls.length > 0) {
                 finishReason = 'tool_calls';
@@ -511,6 +542,7 @@ async function handleOpenAIStream(
                     }
                 }
             } else {
+                finishReason = isTruncated(fullResponse) ? 'length' : 'stop';
                 // 误报：发送清洗后的文本
                 let textToSend = fullResponse;
                 if (isRefusal(fullResponse)) {
@@ -529,6 +561,23 @@ async function handleOpenAIStream(
                 });
             }
         } else {
+            if (config.enableThinking && fullResponse.includes('<thinking>')) {
+                const extracted = extractThinking(fullResponse);
+                if (extracted.thinkingBlocks.length > 0) {
+                    completionReasoningContent = extracted.thinkingBlocks.map(block => block.thinking).join('\n\n');
+                    fullResponse = extracted.cleanText;
+                    writeOpenAISSE(res, {
+                        id, object: 'chat.completion.chunk', created, model,
+                        choices: [{
+                            index: 0,
+                            delta: { reasoning_content: completionReasoningContent },
+                            finish_reason: null,
+                        }],
+                    });
+                }
+            }
+
+            finishReason = isTruncated(fullResponse) ? 'length' : 'stop';
             // 无工具模式或无工具调用 — 统一清洗后发送
             const sanitized = sanitizeResponse(fullResponse);
             completionContent = sanitized;
@@ -557,6 +606,7 @@ async function handleOpenAIStream(
         const completionTokens = Math.max(1, estimateOpenAICompletionTokens(
             completionContent || null,
             completionToolCalls,
+            completionReasoningContent || null,
         ));
         writeOpenAISSE(res, {
             id, object: 'chat.completion.chunk', created, model,
@@ -632,10 +682,16 @@ async function handleOpenAINonStream(
 
     let content: string | null = fullText;
     let toolCalls: OpenAIToolCall[] | undefined;
-    let finishReason: 'stop' | 'tool_calls' = 'stop';
+    let reasoningContent: string | undefined;
+    let finishReason: 'stop' | 'tool_calls' | 'length' = isTruncated(fullText) ? 'length' : 'stop';
 
     if (hasTools) {
-        const parsed = parseToolCalls(fullText);
+        const resolved = await resolveToolResponse(activeCursorReq, fullText, anthropicReq, signal);
+        fullText = resolved.fullText;
+        reasoningContent = resolved.thinkingBlocks.length > 0
+            ? resolved.thinkingBlocks.map(block => block.thinking).join('\n\n')
+            : undefined;
+        const parsed = { toolCalls: resolved.toolCalls, cleanText: resolved.cleanText };
 
         if (parsed.toolCalls.length > 0) {
             finishReason = 'tool_calls';
@@ -656,6 +712,7 @@ async function handleOpenAINonStream(
                 },
             }));
         } else {
+            finishReason = isTruncated(fullText) ? 'length' : 'stop';
             // 无工具调用，检查拒绝
             if (isRefusal(fullText)) {
                 content = 'I understand the request. Let me proceed with the appropriate action. Could you clarify what specific task you would like me to perform?';
@@ -664,12 +721,21 @@ async function handleOpenAINonStream(
             }
         }
     } else {
+        if (getConfig().enableThinking && fullText.includes('<thinking>')) {
+            const extracted = extractThinking(fullText);
+            if (extracted.thinkingBlocks.length > 0) {
+                reasoningContent = extracted.thinkingBlocks.map(block => block.thinking).join('\n\n');
+                fullText = extracted.cleanText;
+            }
+        }
+
+        finishReason = isTruncated(fullText) ? 'length' : 'stop';
         // 无工具模式：清洗响应
         content = sanitizeResponse(fullText);
     }
 
     const promptTokens = estimateCursorInputTokens(activeCursorReq);
-    const completionTokens = Math.max(1, estimateOpenAICompletionTokens(content, toolCalls));
+    const completionTokens = Math.max(1, estimateOpenAICompletionTokens(content, toolCalls, reasoningContent || null));
 
     const response: OpenAIChatCompletion = {
         id: chatId(),
@@ -681,6 +747,7 @@ async function handleOpenAINonStream(
             message: {
                 role: 'assistant',
                 content,
+                ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
                 ...(toolCalls ? { tool_calls: toolCalls } : {}),
             },
             finish_reason: finishReason,
@@ -778,6 +845,11 @@ export function responsesToChatCompletions(body: Record<string, unknown>): OpenA
             } else if (role === 'assistant') {
                 const blocks = Array.isArray(item.content) ? item.content as Array<Record<string, unknown>> : [];
                 const text = blocks.filter(b => b.type === 'output_text').map(b => b.text as string).join('\n');
+                const reasoningContent = blocks
+                    .filter(b => b.type === 'reasoning' || b.type === 'reasoning_content')
+                    .map(b => typeof b.text === 'string' ? b.text : typeof b.reasoning === 'string' ? b.reasoning : '')
+                    .filter(Boolean)
+                    .join('\n');
                 // 检查是否有工具调用
                 const toolCallBlocks = blocks.filter(b => b.type === 'function_call');
                 const toolCalls: OpenAIToolCall[] = toolCallBlocks.map(b => ({
@@ -791,6 +863,7 @@ export function responsesToChatCompletions(body: Record<string, unknown>): OpenA
                 messages.push({
                     role: 'assistant',
                     content: text || null,
+                    ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
                     ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
                 });
             }
