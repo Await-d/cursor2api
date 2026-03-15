@@ -1,4 +1,4 @@
-# Cursor2API v2.5
+# Cursor2API
 
 将 Cursor 文档页免费 AI 对话接口代理转换为 **Anthropic Messages API** 和 **OpenAI Chat Completions API**，支持 **Claude Code** 和 **Cursor IDE** 使用。
 
@@ -50,6 +50,7 @@ npm install
 编辑 `config.yaml`：
 - `cursor_model` - 使用的模型（默认 `anthropic/claude-sonnet-4.6`）
 - `system_prompt_inject` - 可选，给每个请求统一追加一段系统提示词；如果原请求已有 system，会追加在后面
+- `enable_thinking` - 是否启用 `<thinking>...</thinking>` 提取与透传；关闭时代理不会主动注入 Thinking 提示
 - `fingerprint.user_agent` - 浏览器 User-Agent（模拟 Chrome 请求）
 - `vision.enabled` - 开启视觉拦截 (`true` 发送图片前进行降级处理)。
 - `vision.mode` - 视觉模式。推荐 `ocr` (全自动零配置文字提取)。如需真视觉理解改为 `api` 并配置 `baseUrl` 和 `apiKey` 后接入 Gemini/OpenRouter 等。
@@ -87,6 +88,14 @@ docker compose up -d --build
 - `cursor2api` → `http://localhost:3010`
 - `cursor2api-2` → `http://localhost:3011`
 
+Docker 部署时，运行时环境变量统一从 `.env.docker` 读取；如果你要在容器内开启 Thinking 透传，可直接设置：
+
+```bash
+ENABLE_THINKING=true
+```
+
+容器内监听端口固定为 `3010`，需要调整对外暴露端口时请修改宿主机侧映射（`HOST_PORT_1` / `HOST_PORT_2`），不要改容器内端口。
+
 如果你只需要一个实例，可以只启动主服务：
 
 ```bash
@@ -120,6 +129,7 @@ npm run docker:deploy
 - 修改了 `src/`、`package.json`、`package-lock.json`、`tsconfig.json` 后，必须重新 build + recreate
 - `.env.docker` 变更会影响容器环境变量，应执行 `docker compose up -d --force-recreate`
 - 运行时环境变量统一放在 `.env.docker`；`config.yaml` 用于应用配置，若两边都定义同名项，则环境变量优先
+- Docker 下推荐把开关型配置放进 `.env.docker`；例如 `ENABLE_THINKING=true`，而结构化应用配置继续放在 `config.yaml`
 - 部署脚本 `./deploy.sh --docker` 现在会等待所有容器通过健康检查后再返回
 
 ## 项目结构
@@ -200,6 +210,12 @@ AI 按此格式输出 → 我们解析并转换为标准的 Anthropic `tool_use`
 | **L4: 响应清洗** | `handler.ts` | `sanitizeResponse()` 对所有输出做后处理，将 Cursor 身份引用替换为 Claude |
 
 ## 更新日志
+
+### v2.6.6-fork.1 (2026-03-15) — 本地版本元数据对齐 + Thinking / 截断恢复 / Docker 部署入口补齐
+
+- ✨ 将运行时版本从旧的 `2.5.1` / `2.3.2` 元数据提升为 `2.6.6-fork.1`，避免健康检查、首页与日志横幅继续暴露过期版本号
+- ✨ 集成 Thinking 提取与透传、阶梯式截断恢复、反拒绝提示强化，以及 OpenAI `reasoning_content` 兼容路径
+- ✨ Docker 部署补充 `ENABLE_THINKING` / `enable_thinking` 配置入口，并明确容器内固定监听 `3010`
 
 ### v2.5.1 (2026-03-10) — 上下文智能压缩 + 截断检测 + tolerantParse 增强
 
