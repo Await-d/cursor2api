@@ -40,6 +40,11 @@ test('isTruncated ignores complete action block', () => {
     assert(!isTruncated(complete), 'complete tool block should not be truncated');
 });
 
+test('isTruncated ignores complete inline action objects', () => {
+    const inline = 'Take the next step with json action {"tool":"Read","parameters":{"path":"src/index.ts"}}';
+    assert(!isTruncated(inline), 'complete inline action object should not be treated as truncated');
+});
+
 test('deduplicateContinuation removes overlapping prefix', () => {
     const existing = 'Line 1\nLine 2\nLine 3';
     const continuation = 'Line 2\nLine 3\nLine 4';
@@ -58,6 +63,11 @@ test('truncated multi-call output still reports truncation after parsing one val
     const parsed = parseToolCalls(response);
     assert(parsed.toolCalls.some(call => call.name === 'Read'), 'first complete tool call should still parse');
     assert(isTruncated(response), 'response should still be marked truncated when a later call is incomplete');
+});
+
+test('isTruncated ignores long plain text without structural truncation', () => {
+    const longPlainText = 'A'.repeat(2600);
+    assert(!isTruncated(longPlainText), 'long plain text alone should not be marked truncated');
 });
 
 console.log(`\n结果: ${passed} 通过 / ${failed} 失败 / ${passed + failed} 总计\n`);

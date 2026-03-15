@@ -531,14 +531,13 @@ export function isTruncated(text: string): boolean {
 
     const trimmed = text.trimEnd();
     if ((trimmed.match(/```/g) || []).length % 2 !== 0) return true;
-    if (hasToolCalls(trimmed) && !isToolCallComplete(trimmed)) return true;
+    if (/```json\s+action\b/i.test(trimmed) && hasToolCalls(trimmed) && !isToolCallComplete(trimmed)) return true;
 
     const openTags = (trimmed.match(/^<[a-zA-Z]/gm) || []).length;
     const closeTags = (trimmed.match(/^<\/[a-zA-Z]/gm) || []).length;
     if (openTags > closeTags + 1) return true;
 
     if (/[,;:\[{(]\s*$/.test(trimmed)) return true;
-    if (trimmed.length > 2000 && /\\n?\s*$/.test(trimmed) && !trimmed.endsWith('```')) return true;
 
     return false;
 }
@@ -615,8 +614,8 @@ async function recoverTruncatedToolResponse(
     let currentResponse = initialResponse;
 
     const tierPrompts = [
-        () => `Output truncated (${currentResponse.length} chars). Split into smaller parts: use multiple Write/Edit calls (<=150 lines each) or Bash append with cat >> file <<'EOF'. Start with the first chunk now.`,
-        () => `Still truncated (${currentResponse.length} chars). Use <=80 lines per action block and continue the task immediately. Do not explain limitations; emit only the next concrete action block(s).`,
+        () => `Output truncated (${currentResponse.length} chars). Split the next step into smaller sequential action blocks. If you need file changes or shell work, use the available actions in smaller chunks and continue immediately with the first chunk now.`,
+        () => `Still truncated (${currentResponse.length} chars). Reduce the size of each next action block even further and continue the task immediately. Do not explain limitations; emit only the next concrete action block(s).`,
     ];
 
     if (!continuationOnly) {
