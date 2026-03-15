@@ -12,6 +12,7 @@ proxy: ""
 # Cursor 使用的模型
 cursor_model: "anthropic/claude-sonnet-4.6"
 system_prompt_inject: ""
+enable_thinking: false
 
 # 模型映射（可选）：当客户端请求的模型名需映射到实际模型时使用
 # model_mapping:

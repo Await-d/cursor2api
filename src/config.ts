@@ -43,6 +43,7 @@ export function getConfig(): AppConfig {
         queueTimeout: 120_000,
         retryDelay: 5_000,
         maxRetryDelay: 60_000,
+        enableThinking: false,
         modelMapping: {},
         systemPromptInject: '',
         proxyPool: [],
@@ -64,6 +65,7 @@ export function getConfig(): AppConfig {
             if (yaml.queue_timeout) config.queueTimeout = yaml.queue_timeout;
             if (yaml.retry_delay) config.retryDelay = yaml.retry_delay;
             if (yaml.max_retry_delay) config.maxRetryDelay = yaml.max_retry_delay;
+            if (typeof yaml.enable_thinking === 'boolean') config.enableThinking = yaml.enable_thinking;
             if (typeof yaml.system_prompt_inject === 'string') config.systemPromptInject = yaml.system_prompt_inject;
             const yamlModelMapping = parseModelMapping(yaml.model_mapping ?? yaml.model_map);
             if (Object.keys(yamlModelMapping).length > 0) {
@@ -101,6 +103,7 @@ export function getConfig(): AppConfig {
     if (process.env.QUEUE_TIMEOUT) config.queueTimeout = parseInt(process.env.QUEUE_TIMEOUT);
     if (process.env.RETRY_DELAY) config.retryDelay = parseInt(process.env.RETRY_DELAY);
     if (process.env.MAX_RETRY_DELAY) config.maxRetryDelay = parseInt(process.env.MAX_RETRY_DELAY);
+    if (process.env.ENABLE_THINKING) config.enableThinking = /^(1|true|yes|on)$/i.test(process.env.ENABLE_THINKING);
     if (process.env.SYSTEM_PROMPT_INJECT) config.systemPromptInject = process.env.SYSTEM_PROMPT_INJECT;
     if (process.env.MODEL_MAPPING) {
         try {
