@@ -126,6 +126,11 @@ export interface AppConfig {
     queueTimeout: number;
     retryDelay: number;
     maxRetryDelay: number;
+    direct429CooldownMs: number;
+    proxyHealthCheckIntervalMs: number;
+    proxyProbeTimeoutMs: number;
+    proxyPauseBaseMs: number;
+    proxyPauseMaxMs: number;
     enableThinking: boolean;
     modelMapping: Record<string, string>;
     systemPromptInject: string;
