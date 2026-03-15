@@ -39,8 +39,10 @@ export interface AnthropicMessage {
 }
 
 export interface AnthropicContentBlock {
-    type: 'text' | 'tool_use' | 'tool_result' | 'image';
+    type: 'text' | 'tool_use' | 'tool_result' | 'image' | 'thinking';
     text?: string;
+    thinking?: string;
+    signature?: string;
     // image fields
     source?: { type: string; media_type?: string; data: string };
     // tool_use fields
@@ -124,6 +126,7 @@ export interface AppConfig {
     queueTimeout: number;
     retryDelay: number;
     maxRetryDelay: number;
+    enableThinking: boolean;
     modelMapping: Record<string, string>;
     systemPromptInject: string;
     proxyPool: string[];
