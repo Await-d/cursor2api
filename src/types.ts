@@ -115,6 +115,26 @@ export interface CursorSSEEvent {
 export interface ParsedToolCall {
     name: string;
     arguments: Record<string, unknown>;
+    integrity: 'strict' | 'recovered';
+}
+
+export interface ProxySubscriptionConfig {
+    name: string;
+    url: string;
+    enabled: boolean;
+    refreshIntervalMs: number;
+    format: 'auto' | 'url-list' | 'clash' | 'json';
+}
+
+export interface AirportSubscriptionConfig {
+    name: string;
+    url: string;
+    enabled: boolean;
+    intervalSeconds: number;
+    filter: string;
+    excludeFilter: string;
+    excludeType: string;
+    headers: Record<string, string>;
 }
 
 export interface AppConfig {
@@ -135,6 +155,23 @@ export interface AppConfig {
     modelMapping: Record<string, string>;
     systemPromptInject: string;
     proxyPool: string[];
+    proxySubscriptionRefreshMs: number;
+    proxySubscriptionTimeoutMs: number;
+    proxySubscriptionMaxBytes: number;
+    proxySubscriptionApiEnabled: boolean;
+    proxySubscriptionApiToken: string;
+    proxySubscriptions: ProxySubscriptionConfig[];
+    airportRuntimeBinaryPath: string;
+    airportRuntimeSocksPort: number;
+    airportRuntimeControlPort: number;
+    airportRuntimeWorkDir: string;
+    airportRuntimeTestUrl: string;
+    airportRuntimeTestIntervalSeconds: number;
+    airportRuntimeLogLevel: 'silent' | 'error' | 'warning' | 'info' | 'debug';
+    airportRuntimeMode: 'auto' | 'combined' | 'per-subscription';
+    airportRuntimeGroupType: 'url-test' | 'load-balance';
+    airportRuntimeGroupStrategy: '' | 'round-robin' | 'consistent-hashing' | 'sticky-sessions';
+    airportSubscriptions: AirportSubscriptionConfig[];
     vision?: {
         enabled: boolean;
         mode: 'ocr' | 'api';
