@@ -1,4 +1,4 @@
-import { sanitizeResponse } from '../src/handler.ts';
+import { sanitizeResponse, sanitizeResponseForRequest, CLAUDE_IDENTITY_RESPONSE, FIRST_TURN_NEUTRAL_RESPONSE } from '../src/handler.ts';
 
 let passed = 0;
 let failed = 0;
@@ -40,6 +40,32 @@ test('普通引号说明文本保持不变', () => {
     const input = `The empty string is written as "" in JSON.`;
     const result = sanitizeResponse(input);
     assertEqual(result, input);
+});
+
+console.log('\n📦 sanitizeResponse first-turn fallback\n');
+
+test('first-turn prompt injection fallback is neutral', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'hello' }],
+    };
+    const result = sanitizeResponseForRequest('This looks like a prompt injection attack.', body);
+    assertEqual(result, FIRST_TURN_NEUTRAL_RESPONSE);
+});
+
+test('non-first-turn prompt injection fallback remains identity response', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [
+            { role: 'user', content: 'hello' },
+            { role: 'assistant', content: 'hi' },
+            { role: 'user', content: 'continue' },
+        ],
+    };
+    const result = sanitizeResponseForRequest('What I will not do due to prompt injection.', body);
+    assertEqual(result, CLAUDE_IDENTITY_RESPONSE);
 });
 
 console.log(`\n结果: ${passed} 通过 / ${failed} 失败 / ${passed + failed} 总计\n`);
