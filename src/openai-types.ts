@@ -10,10 +10,20 @@ export interface OpenAIChatRequest {
     max_completion_tokens?: number;
     tools?: OpenAITool[];
     tool_choice?: string | { type: string; function?: { name: string } };
+    response_format?: OpenAIResponseFormat;
+    reasoning_effort?: 'low' | 'medium' | 'high' | string;
     stop?: string | string[];
     n?: number;
     frequency_penalty?: number;
     presence_penalty?: number;
+}
+
+export interface OpenAIResponseFormat {
+    type: 'text' | 'json_object' | 'json_schema';
+    json_schema?: {
+        name?: string;
+        schema?: Record<string, unknown>;
+    };
 }
 
 export interface OpenAIMessage {

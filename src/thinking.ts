@@ -1,3 +1,5 @@
+import type { AnthropicRequest } from './types.js';
+
 export interface ThinkingBlock {
     thinking: string;
 }
@@ -51,6 +53,23 @@ export function extractThinking(text: string): ExtractThinkingResult {
     }
 
     return { thinkingBlocks, cleanText };
+}
+
+export function isAnthropicThinkingEnabled(
+    requestThinking: AnthropicRequest['thinking'] | undefined,
+    defaultEnabled: boolean,
+): boolean {
+    if (requestThinking?.type === 'enabled') return true;
+    if (requestThinking?.type === 'disabled') return false;
+    return defaultEnabled;
+}
+
+export function extractThinkingIfEnabled(text: string, enabled: boolean): ExtractThinkingResult {
+    if (!enabled) {
+        return { thinkingBlocks: [], cleanText: text };
+    }
+
+    return extractThinking(text);
 }
 
 export const THINKING_HINT = `You may use <thinking>...</thinking> for brief private reasoning. HARD LIMITS: max 3 lines, max 120 words. Do NOT write code, full solutions, or long analysis inside thinking. Never repeat thinking content in the final response.`;

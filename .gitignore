@@ -64,3 +64,4 @@ dist/
 build/
 *.traineddata
 .env.docker
+.env.docker

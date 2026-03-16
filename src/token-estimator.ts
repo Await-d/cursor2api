@@ -1,4 +1,5 @@
 import { getConfig } from './config.js';
+import { isWellKnownToolName } from './tool-metadata.js';
 import type {
     AnthropicContentBlock,
     AnthropicMessage,
@@ -114,7 +115,9 @@ function estimateToolDefinitionTokens(tools?: AnthropicTool[]): number {
     let total = 0;
     for (const tool of tools) {
         total += estimateTextTokens(tool.name);
-        total += estimateTextTokens(tool.description || '');
+        if (!isWellKnownToolName(tool.name)) {
+            total += estimateTextTokens(tool.description || '');
+        }
         total += estimateTextTokens(JSON.stringify(tool.input_schema || {}));
     }
 

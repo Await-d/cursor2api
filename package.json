@@ -20,8 +20,9 @@
     "test:tool-fixer": "node test/unit-tool-fixer.mjs",
     "test:openai-compat": "node test/unit-openai-compat.mjs",
     "test:thinking": "node --import tsx test/unit-thinking.mjs",
+    "test:converter-features": "node --import tsx test/unit-converter-features.mjs",
     "test:truncation": "node --import tsx test/unit-truncation-recovery.mjs",
-    "test:all": "node test/unit-tolerant-parse.mjs && node --import tsx test/unit-retry-prompt-pool.mjs && node --import tsx test/unit-sanitize-response.mjs && node --import tsx test/unit-proxy-subscriptions.mjs && node --import tsx test/unit-airport-runtime.mjs && node test/unit-tool-fixer.mjs && node test/unit-openai-compat.mjs && node --import tsx test/unit-thinking.mjs && node --import tsx test/unit-truncation-recovery.mjs",
+    "test:all": "node test/unit-tolerant-parse.mjs && node --import tsx test/unit-retry-prompt-pool.mjs && node --import tsx test/unit-sanitize-response.mjs && node --import tsx test/unit-proxy-subscriptions.mjs && node --import tsx test/unit-airport-runtime.mjs && node test/unit-tool-fixer.mjs && node test/unit-openai-compat.mjs && node --import tsx test/unit-thinking.mjs && node --import tsx test/unit-converter-features.mjs && node --import tsx test/unit-truncation-recovery.mjs",
 
     "test:e2e": "node test/e2e-chat.mjs",
     "test:agentic": "node test/e2e-agentic.mjs"

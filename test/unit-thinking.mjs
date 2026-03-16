@@ -1,5 +1,5 @@
 import { extractThinking } from '../src/thinking.ts';
-import { responsesToChatCompletions } from '../src/openai-handler.ts';
+import { convertToAnthropicRequest, formatOpenAIMockText, responsesToChatCompletions, stripMarkdownJsonWrapper } from '../src/openai-handler.ts';
 
 let passed = 0;
 let failed = 0;
@@ -69,6 +69,147 @@ test('responsesToChatCompletions keeps reasoning field payloads', () => {
 
     assertEqual(result.messages[0].reasoning_content, 'hidden chain');
     assertEqual(result.messages[0].content, 'final answer');
+});
+
+test('convertToAnthropicRequest enables thinking from reasoning_effort', () => {
+    const result = convertToAnthropicRequest({
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'Think carefully' }],
+        reasoning_effort: 'high',
+    });
+
+    assertEqual(result.thinking, { type: 'enabled' });
+});
+
+test('convertToAnthropicRequest enables thinking for thinking models', () => {
+    const result = convertToAnthropicRequest({
+        model: 'gpt-5-thinking',
+        messages: [{ role: 'user', content: 'Need deep reasoning' }],
+    });
+
+    assertEqual(result.thinking, { type: 'enabled' });
+});
+
+test('convertToAnthropicRequest appends response_format guidance to last user message', () => {
+    const result = convertToAnthropicRequest({
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'Return a payload' }],
+        response_format: {
+            type: 'json_schema',
+            json_schema: {
+                name: 'payload',
+                schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+            },
+        },
+    });
+
+    assert(typeof result.messages[0].content === 'string', 'last user message should remain string');
+    assert(result.messages[0].content.includes('Respond in plain JSON format without markdown wrapping.'), 'missing plain JSON guidance');
+    assert(result.messages[0].content.includes('"ok"'), 'missing schema payload in appended guidance');
+});
+
+test('convertToAnthropicRequest respects caller max_tokens values', () => {
+    const result = convertToAnthropicRequest({
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'Short response only' }],
+        max_tokens: 256,
+    });
+
+    assertEqual(result.max_tokens, 256);
+});
+
+test('convertToAnthropicRequest maps required tool_choice to any', () => {
+    const result = convertToAnthropicRequest({
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'Use a tool' }],
+        tools: [{
+            type: 'function',
+            function: {
+                name: 'Read',
+                description: 'Read file contents',
+                parameters: { type: 'object', properties: { path: { type: 'string' } } },
+            },
+        }],
+        tool_choice: 'required',
+    });
+
+    assertEqual(result.tool_choice, { type: 'any' });
+    assertEqual(result.tools?.length, 1);
+});
+
+test('convertToAnthropicRequest maps function tool_choice to specific tool', () => {
+    const result = convertToAnthropicRequest({
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'Read the file' }],
+        tools: [{
+            type: 'function',
+            function: {
+                name: 'Read',
+                description: 'Read file contents',
+                parameters: { type: 'object', properties: { path: { type: 'string' } } },
+            },
+        }],
+        tool_choice: { type: 'function', function: { name: 'Read' } },
+    });
+
+    assertEqual(result.tool_choice, { type: 'tool', name: 'Read' });
+});
+
+test('convertToAnthropicRequest disables tools when tool_choice is none', () => {
+    const result = convertToAnthropicRequest({
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'Do not use tools' }],
+        tools: [{
+            type: 'function',
+            function: {
+                name: 'Read',
+                description: 'Read file contents',
+                parameters: { type: 'object', properties: { path: { type: 'string' } } },
+            },
+        }],
+        tool_choice: 'none',
+    });
+
+    assertEqual(result.tools, undefined);
+    assertEqual(result.tool_choice, undefined);
+});
+
+test('responsesToChatCompletions preserves response_format and reasoning_effort', () => {
+    const responseFormat = { type: 'json_object' };
+    const result = responsesToChatCompletions({
+        model: 'gpt-5',
+        input: 'Hello',
+        response_format: responseFormat,
+        reasoning_effort: 'medium',
+    });
+
+    assertEqual(result.response_format, responseFormat);
+    assertEqual(result.reasoning_effort, 'medium');
+});
+
+test('stripMarkdownJsonWrapper unwraps fenced json payloads', () => {
+    const input = '```json\n{\n  "ok": true\n}\n```';
+    assertEqual(stripMarkdownJsonWrapper(input), '{\n  "ok": true\n}');
+});
+
+test('formatOpenAIMockText wraps json response_format', () => {
+    const body = {
+        model: 'gpt-5',
+        messages: [],
+        response_format: { type: 'json_object' },
+    };
+    const output = formatOpenAIMockText(body, 'Identity response');
+    assertEqual(output, '{"message":"Identity response"}');
+});
+
+test('formatOpenAIMockText keeps text response_format', () => {
+    const body = {
+        model: 'gpt-5',
+        messages: [],
+        response_format: { type: 'text' },
+    };
+    const output = formatOpenAIMockText(body, 'Identity response');
+    assertEqual(output, 'Identity response');
 });
 
 console.log(`\n结果: ${passed} 通过 / ${failed} 失败 / ${passed + failed} 总计\n`);

@@ -98,6 +98,11 @@ function responsesToChatCompletions(body) {
             } else if (role === 'assistant') {
                 const blocks = Array.isArray(item.content) ? item.content : [];
                 const text = blocks.filter(b => b.type === 'output_text').map(b => b.text).join('\n');
+                const reasoningContent = blocks
+                    .filter(b => b.type === 'reasoning' || b.type === 'reasoning_content')
+                    .map(b => typeof b.text === 'string' ? b.text : typeof b.reasoning === 'string' ? b.reasoning : '')
+                    .filter(Boolean)
+                    .join('\n');
                 const toolCallBlocks = blocks.filter(b => b.type === 'function_call');
                 const toolCalls = toolCallBlocks.map(b => ({
                     id: b.call_id || `call_${Math.random().toString(36).slice(2)}`,
@@ -110,6 +115,7 @@ function responsesToChatCompletions(body) {
                 messages.push({
                     role: 'assistant',
                     content: text || null,
+                    ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
                     ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
                 });
             }
@@ -127,13 +133,18 @@ function responsesToChatCompletions(body) {
         }))
         : undefined;
 
+    const maxTokens = body.max_output_tokens ?? body.max_tokens;
+
     return {
         model: body.model || 'gpt-4',
         messages,
         stream: body.stream ?? true,
         temperature: body.temperature,
-        max_tokens: body.max_output_tokens || 8192,
+        max_tokens: typeof maxTokens === 'number' ? maxTokens : 8192,
         tools,
+        tool_choice: body.tool_choice,
+        response_format: body.response_format,
+        reasoning_effort: body.reasoning_effort,
     };
 }
 
@@ -237,10 +248,52 @@ test('助手消息带 function_call → tool_calls', () => {
         ],
     });
     assertEqual(result.messages[1].role, 'assistant');
-    assert(result.messages[1].tool_calls, 'should have tool_calls');
-    assertEqual(result.messages[1].tool_calls.length, 1);
-    assertEqual(result.messages[1].tool_calls[0].function.name, 'read_file');
-    assertEqual(result.messages[1].tool_calls[0].function.arguments, '{"path":"index.ts"}');
+    const assistantMessage = result.messages[1];
+    const toolCalls = Reflect.get(assistantMessage, 'tool_calls');
+    assert(Array.isArray(toolCalls), 'should have tool_calls');
+    assertEqual(toolCalls.length, 1);
+    assertEqual(toolCalls[0].function.name, 'read_file');
+    assertEqual(toolCalls[0].function.arguments, '{"path":"index.ts"}');
+});
+
+test('assistant reasoning blocks → reasoning_content', () => {
+    const result = responsesToChatCompletions({
+        model: 'gpt-4',
+        input: [{
+            role: 'assistant',
+            content: [
+                { type: 'reasoning', text: 'hidden summary' },
+                { type: 'output_text', text: 'visible answer' },
+            ],
+        }],
+    });
+
+    assertEqual(result.messages[0].reasoning_content, 'hidden summary');
+    assertEqual(result.messages[0].content, 'visible answer');
+});
+
+test('response_format and reasoning_effort are preserved', () => {
+    const responseFormat = { type: 'json_object' };
+    const result = responsesToChatCompletions({
+        model: 'gpt-4',
+        input: 'hello',
+        response_format: responseFormat,
+        reasoning_effort: 'medium',
+    });
+
+    assertEqual(result.response_format, responseFormat);
+    assertEqual(result.reasoning_effort, 'medium');
+});
+
+test('tool_choice is preserved for responses conversion', () => {
+    const toolChoice = { type: 'function', function: { name: 'read_file' } };
+    const result = responsesToChatCompletions({
+        model: 'gpt-4',
+        input: 'hello',
+        tool_choice: toolChoice,
+    });
+
+    assertEqual(result.tool_choice, toolChoice);
 });
 
 test('工具定义转换', () => {
@@ -290,6 +343,11 @@ test('stream 显式设为 false', () => {
 test('max_output_tokens 转换', () => {
     const result = responsesToChatCompletions({ model: 'gpt-4', input: 'hi', max_output_tokens: 4096 });
     assertEqual(result.max_tokens, 4096);
+});
+
+test('max_tokens 转换（fallback）', () => {
+    const result = responsesToChatCompletions({ model: 'gpt-4', input: 'hi', max_tokens: 2048 });
+    assertEqual(result.max_tokens, 2048);
 });
 
 // ════════════════════════════════════════════════════════════════════
