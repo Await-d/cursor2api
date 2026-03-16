@@ -61,16 +61,8 @@ function isLikelyRefusal(text: string): boolean {
     return isRefusal(trimmed.substring(0, 300));
 }
 
-function resolveOpenAIThinking(body: Pick<OpenAIChatRequest, 'model' | 'reasoning_effort'>): AnthropicRequest['thinking'] | undefined {
-    const hasReasoningEffort = typeof body.reasoning_effort === 'string'
-        ? body.reasoning_effort.trim().length > 0
-        : body.reasoning_effort !== undefined && body.reasoning_effort !== null;
-
-    if (hasReasoningEffort || /thinking/i.test(body.model)) {
-        return { type: 'enabled' };
-    }
-
-    return undefined;
+function resolveOpenAIThinking(_body: Pick<OpenAIChatRequest, 'model' | 'reasoning_effort'>): AnthropicRequest['thinking'] {
+    return { type: 'enabled' };
 }
 
 function resolveOpenAIToolChoice(choice: OpenAIChatRequest['tool_choice']): {
