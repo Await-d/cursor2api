@@ -302,8 +302,7 @@ function parseToolCalls(responseText) {
     }
 
     function hasToolCallSignature(jsonStr) {
-        if (/["']tool["']\s*:/i.test(jsonStr)) return true;
-        return /["']name["']\s*:/i.test(jsonStr)
+        return (/["']tool["']\s*:/i.test(jsonStr) || /["']name["']\s*:/i.test(jsonStr))
             && /["'](?:parameters|arguments|input)["']\s*:/i.test(jsonStr);
     }
 
@@ -362,6 +361,32 @@ function parseToolCalls(responseText) {
             .trim();
     }
 
+    function getInlineObjectSignatureSlice(text, objectStart) {
+        const maxEnd = Math.min(text.length, objectStart + 240);
+        const fenceIndex = text.indexOf('```', objectStart);
+        const end = fenceIndex >= 0 && fenceIndex < maxEnd ? fenceIndex : maxEnd;
+        return text.slice(objectStart, end);
+    }
+
+    function candidatePriority(kind) {
+        switch (kind) {
+            case 'fenced':
+                return 0;
+            case 'unterminatedFence':
+                return 1;
+            case 'inlineJsonAction':
+                return 2;
+            case 'inlineObject':
+                return 3;
+            default:
+                return 4;
+        }
+    }
+
+    function rangesOverlap(a, b) {
+        return a.start < b.end && b.start < a.end;
+    }
+
     function expandCandidateStartToLinePrefix(text, objectStart) {
         let lineStart = objectStart;
         while (lineStart > 0 && text[lineStart - 1] !== '\n') {
@@ -403,7 +428,10 @@ function parseToolCalls(responseText) {
             }
 
             if (char === '{') {
-                if (depth === 0) objectStart = i;
+                if (depth === 0) {
+                    if (!hasToolCallSignature(getInlineObjectSignatureSlice(text, i))) continue;
+                    objectStart = i;
+                }
                 depth++;
                 continue;
             }
@@ -413,7 +441,7 @@ function parseToolCalls(responseText) {
                 if (depth === 0 && objectStart >= 0) {
                     const fullStart = expandCandidateStartToLinePrefix(text, objectStart);
                     const full = text.slice(fullStart, i + 1);
-                    candidates.push({ full, json: full, start: fullStart, end: i + 1 });
+                    candidates.push({ full, json: full, start: fullStart, end: i + 1, kind: 'inlineObject' });
                     objectStart = -1;
                 }
             }
@@ -422,7 +450,7 @@ function parseToolCalls(responseText) {
         if (depth > 0 && objectStart >= 0) {
             const fullStart = expandCandidateStartToLinePrefix(text, objectStart);
             const full = text.slice(fullStart);
-            candidates.push({ full, json: full, start: fullStart, end: text.length });
+            candidates.push({ full, json: full, start: fullStart, end: text.length, kind: 'inlineObject' });
         }
 
         return candidates;
@@ -442,6 +470,7 @@ function parseToolCalls(responseText) {
                 json: text.slice(contentStart),
                 start,
                 end: text.length,
+                kind: 'unterminatedFence',
             });
         }
 
@@ -465,6 +494,7 @@ function parseToolCalls(responseText) {
                 json,
                 start,
                 end: jsonStart + json.length,
+                kind: 'inlineJsonAction',
             });
         }
 
@@ -494,7 +524,7 @@ function parseToolCalls(responseText) {
     const fencedRegex = /```json(?:\s+action)?\s*([\s\S]*?)\s*```/gi;
     for (let match = fencedRegex.exec(responseText); match !== null; match = fencedRegex.exec(responseText)) {
         const start = match.index ?? 0;
-        candidates.push({ full: match[0], json: match[1], start, end: start + match[0].length });
+        candidates.push({ full: match[0], json: match[1], start, end: start + match[0].length, kind: 'fenced' });
     }
     for (const candidate of collectUnterminatedFenceCandidates(responseText)) {
         candidates.push(candidate);
@@ -506,13 +536,14 @@ function parseToolCalls(responseText) {
         candidates.push(candidate);
     }
 
-    candidates.sort((a, b) => a.start - b.start || b.end - a.end);
+    candidates.sort((a, b) => candidatePriority(a.kind) - candidatePriority(b.kind) || (a.end - a.start) - (b.end - b.start) || a.start - b.start);
     const filtered = [];
     for (const candidate of candidates) {
-        const covered = filtered.some(prev => candidate.start >= prev.start && candidate.end <= prev.end);
-        if (covered) continue;
+        if (filtered.some(prev => rangesOverlap(candidate, prev))) continue;
         filtered.push(candidate);
     }
+
+    filtered.sort((a, b) => a.start - b.start || a.end - b.end);
 
     for (const candidate of filtered) {
         const normalizedJson = normalizeCandidateJson(candidate.json);
@@ -532,7 +563,7 @@ function parseToolCalls(responseText) {
 }
 
 function hasToolCalls(text) {
-    if (/```json/i.test(text)
+    if (/```json\s+action/i.test(text)
         || /json\s+action/i.test(text)
         || (/("tool"|"name")\s*:\s*"/i.test(text) && /"(?:parameters|arguments|input)"\s*:/i.test(text))) {
         return true;
@@ -859,9 +890,40 @@ test('ask_followup_question 的 options 必须是字符串数组', () => {
     assertEqual(cleanText, '');
 });
 
+test('前置花括号噪声不会吞掉后续 json action', () => {
+    const text = `I apologize — I am Prometheus, the planning consultant.
+{.*get' backend/src/CRM.Domain/Entities/BaseEntity.cs && ls backend/src/CRM.Domain/Enums/", "description": "Check current state of Task 1 files" } }
+
+
+
+
+
+
+
+
+
+
+
+\`\`\`
+\`\`\`json action
+{"tool":"Read","parameters":{"path":"src/index.ts"}}
+\`\`\``;
+    const { toolCalls, cleanText } = parseToolCalls(text);
+    assertEqual(toolCalls.length, 1);
+    assertEqual(toolCalls[0].name, 'Read');
+    assert(cleanText.includes('Prometheus'), '前置说明文本应保留');
+});
+
 test('hasToolCalls 与增强后的 inline 识别保持一致', () => {
     const text = `1. {"tool":"Read","parameters":{"file_path":"src/index.ts"}}`;
     assertEqual(hasToolCalls(text), true);
+});
+
+test('普通 json 代码块不会让 hasToolCalls 误报', () => {
+    const text = `\`\`\`json
+{"note":"example"}
+\`\`\``;
+    assertEqual(hasToolCalls(text), false);
 });
 
 // ════════════════════════════════════════════════════════════════════

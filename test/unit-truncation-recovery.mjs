@@ -1,5 +1,11 @@
-import { deduplicateContinuation, isTruncated } from '../src/handler.ts';
-import { parseToolCalls } from '../src/converter.ts';
+import {
+    deduplicateContinuation,
+    finalizeToolResponseForClient,
+    getAnthropicToolStopReason,
+    getOpenAIToolFinishReason,
+    isTruncated,
+} from '../src/handler.ts';
+import { hasToolCalls, parseToolCalls } from '../src/converter.ts';
 
 let passed = 0;
 let failed = 0;
@@ -62,7 +68,84 @@ test('truncated multi-call output still reports truncation after parsing one val
 
     const parsed = parseToolCalls(response);
     assert(parsed.toolCalls.some(call => call.name === 'Read'), 'first complete tool call should still parse');
+    assert(parsed.toolCalls.some(call => call.name === 'Read' && call.integrity === 'strict'), 'complete tool call should be marked strict');
+    assert(parsed.toolCalls.some(call => call.name === 'Write' && call.integrity === 'recovered'), 'truncated tool call should be marked recovered');
     assert(isTruncated(response), 'response should still be marked truncated when a later call is incomplete');
+});
+
+test('finalizeToolResponseForClient keeps only strict tool calls for truncated output', () => {
+    const response = [
+        '```json action',
+        '{"tool":"Read","parameters":{"path":"a.txt"}}',
+        '```',
+        '```json action',
+        '{"tool":"Write","parameters":{"path":"b.txt"',
+    ].join('\n');
+
+    const parsed = parseToolCalls(response);
+    const finalized = finalizeToolResponseForClient(response, parsed);
+
+    assert(finalized.stillTruncated, 'truncated tool response should remain marked truncated');
+    assertEqual(finalized.toolCalls.map(call => call.name), ['Read']);
+    assertEqual(finalized.cleanText, '');
+    assertEqual(finalized.droppedRecoveredToolCalls, 1);
+    assertEqual(getAnthropicToolStopReason(finalized), 'tool_use');
+    assertEqual(getOpenAIToolFinishReason(finalized), 'tool_calls');
+});
+
+test('finalizeToolResponseForClient drops recovered truncated write calls entirely', () => {
+    const response = [
+        '```json action',
+        '{"tool":"Write","parameters":{"path":"plan.md","content":"hello world',
+    ].join('\n');
+
+    const parsed = parseToolCalls(response);
+    const finalized = finalizeToolResponseForClient(response, parsed);
+
+    assertEqual(parsed.toolCalls[0]?.integrity, 'recovered');
+    assert(finalized.stillTruncated, 'single truncated write should remain marked truncated');
+    assertEqual(finalized.toolCalls.length, 0);
+    assertEqual(finalized.cleanText, '');
+    assertEqual(finalized.droppedRecoveredToolCalls, 1);
+    assertEqual(getAnthropicToolStopReason(finalized), 'max_tokens');
+    assertEqual(getOpenAIToolFinishReason(finalized), 'length');
+});
+
+test('finalizeToolResponseForClient suppresses explanatory text for recovered-only truncated output', () => {
+    const response = [
+        'The file is severely corrupted with duplicates. I will rewrite it completely from scratch.',
+        '```json action',
+        '{"tool":"Write","parameters":{"path":"plan.md","content":"hello world',
+    ].join('\n\n');
+
+    const parsed = parseToolCalls(response);
+    const finalized = finalizeToolResponseForClient(response, parsed);
+
+    assertEqual(parsed.cleanText, 'The file is severely corrupted with duplicates. I will rewrite it completely from scratch.');
+    assertEqual(finalized.toolCalls.length, 0);
+    assertEqual(finalized.cleanText, '');
+    assertEqual(getAnthropicToolStopReason(finalized), 'max_tokens');
+});
+
+test('parseToolCalls prefers explicit json action over earlier brace noise', () => {
+    const response = [
+        'I apologize — I am Prometheus, the planning consultant.',
+        '{.*get\' backend/src/CRM.Domain/Entities/BaseEntity.cs && ls backend/src/CRM.Domain/Enums/", "description": "Check current state of Task 1 files" } }',
+        '```',
+        '```json action',
+        '{"tool":"Read","parameters":{"path":"src/index.ts"}}',
+        '```',
+    ].join('\n');
+
+    const parsed = parseToolCalls(response);
+    assertEqual(parsed.toolCalls.map(call => call.name), ['Read']);
+    assertEqual(parsed.toolCalls[0]?.integrity, 'strict');
+    assert(parsed.cleanText.includes('Prometheus'), 'leading prose should be preserved');
+});
+
+test('hasToolCalls ignores plain json fences without action signature', () => {
+    const response = '```json\n{"note":"example"}\n```';
+    assertEqual(hasToolCalls(response), false);
 });
 
 test('isTruncated ignores long plain text without structural truncation', () => {

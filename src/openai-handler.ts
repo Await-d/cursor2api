@@ -24,7 +24,7 @@ import type {
     CursorChatRequest,
     CursorSSEEvent,
 } from './types.js';
-import { convertToCursorRequest, parseToolCalls, hasToolCalls } from './converter.js';
+import { convertToCursorRequest, hasToolCalls } from './converter.js';
 import { sendCursorRequest, sendCursorRequestFull, isAbortError } from './cursor-client.js';
 import { getConfig } from './config.js';
 import { estimateCursorInputTokens, estimateOpenAICompletionTokens } from './token-estimator.js';
@@ -38,6 +38,7 @@ import {
     CLAUDE_IDENTITY_RESPONSE,
     CLAUDE_TOOLS_RESPONSE,
     MAX_REFUSAL_RETRIES,
+    getOpenAIToolFinishReason,
     resolveToolResponse,
     isTruncated,
 } from './handler.js';
@@ -473,7 +474,7 @@ async function handleOpenAIStream(
             const { toolCalls, cleanText } = resolved;
 
             if (toolCalls.length > 0) {
-                finishReason = 'tool_calls';
+                finishReason = getOpenAIToolFinishReason(resolved);
 
                 // 发送工具调用前的残余文本（清洗后）
                 let cleanOutput = isRefusal(cleanText) ? '' : cleanText;
@@ -542,13 +543,13 @@ async function handleOpenAIStream(
                     }
                 }
             } else {
-                finishReason = isTruncated(fullResponse) ? 'length' : 'stop';
+                finishReason = getOpenAIToolFinishReason(resolved);
                 // 误报：发送清洗后的文本
-                let textToSend = fullResponse;
+                let textToSend = resolved.stillTruncated ? resolved.cleanText : fullResponse;
                 if (isRefusal(fullResponse)) {
                     textToSend = 'I understand the request. Let me proceed with the appropriate action. Could you clarify what specific task you would like me to perform?';
                 } else {
-                    textToSend = sanitizeResponse(fullResponse);
+                    textToSend = sanitizeResponse(resolved.stillTruncated ? resolved.cleanText : fullResponse);
                 }
                 completionContent = textToSend;
                 writeOpenAISSE(res, {
@@ -694,7 +695,7 @@ async function handleOpenAINonStream(
         const parsed = { toolCalls: resolved.toolCalls, cleanText: resolved.cleanText };
 
         if (parsed.toolCalls.length > 0) {
-            finishReason = 'tool_calls';
+            finishReason = getOpenAIToolFinishReason(resolved);
             // 清洗拒绝文本
             let cleanText = parsed.cleanText;
             if (isRefusal(cleanText)) {
@@ -712,12 +713,12 @@ async function handleOpenAINonStream(
                 },
             }));
         } else {
-            finishReason = isTruncated(fullText) ? 'length' : 'stop';
+            finishReason = getOpenAIToolFinishReason(resolved);
             // 无工具调用，检查拒绝
             if (isRefusal(fullText)) {
                 content = 'I understand the request. Let me proceed with the appropriate action. Could you clarify what specific task you would like me to perform?';
             } else {
-                content = sanitizeResponse(fullText);
+                content = sanitizeResponse(resolved.stillTruncated ? resolved.cleanText : fullText);
             }
         }
     } else {

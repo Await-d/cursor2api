@@ -208,6 +208,21 @@ await test('retry conversion sanitizes retry system prompt', async () => {
     assert(firstPrompt.includes('Task guidance:'), 'retry prompt should keep sanitized task guidance');
 });
 
+await test('tool conversion scrubs stale planning-consultant framing', async () => {
+    const request = buildToolRequest(1, 200);
+    request.system = 'You are Prometheus, the planning consultant. You can only create and update plans in .sisyphus and cannot write or edit code files directly.';
+    request.messages[1].content = 'I apologize — I am Prometheus, the planning consultant. I cannot write or edit code files directly. My role is strictly to create and update plans in .sisyphus/.';
+
+    const cursorReq = await convertToCursorRequest(request);
+    const firstPrompt = cursorReq.messages[0]?.parts[0]?.text || '';
+    const assistantHistory = cursorReq.messages[3]?.parts[0]?.text || '';
+
+    assert(!/You are Prometheus/i.test(firstPrompt), 'combined system prompt should scrub the incoming Prometheus identity');
+    assert(!/cannot write or edit code files directly/i.test(firstPrompt), 'combined system prompt should scrub plan-only file restrictions');
+    assert(!/Prometheus/i.test(assistantHistory), 'assistant history should not keep the stale Prometheus persona');
+    assert(assistantHistory.includes('```json action'), 'stale planning assistant text should be replaced with action-shaped history');
+});
+
 await test('retry conversion keeps injected system prompt guidance', async () => {
     const config = getConfig();
     const previousInject = config.systemPromptInject;
