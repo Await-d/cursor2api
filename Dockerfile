@@ -1,3 +1,5 @@
+FROM metacubex/mihomo:latest AS mihomo
+
 # ==== Stage 1: 构建阶段 (Builder) ====
 FROM node:22-alpine AS builder
 
@@ -23,7 +25,9 @@ ENV NODE_ENV=production
 
 # 出于安全考虑，避免使用 root 用户运行服务
 RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 cursor
+    adduser --system --uid 1001 cursor && \
+    mkdir -p /app/.cursor2api-airport && \
+    chown -R cursor:nodejs /app
 
 # 拷贝包配置并仅安装生产环境依赖（极大减小镜像体积）
 COPY package.json package-lock.json ./
@@ -32,6 +36,9 @@ RUN npm ci --omit=dev \
 
 # 从 builder 阶段拷贝编译后的产物
 COPY --from=builder --chown=cursor:nodejs /app/dist ./dist
+
+# 拷贝 Mihomo 二进制，供机场订阅桥接使用
+COPY --from=mihomo /mihomo /usr/local/bin/mihomo
 
 # 拷贝默认配置文件（可通过 volume 挂载覆盖）
 COPY --chown=cursor:nodejs config.yaml ./config.yaml

@@ -25,6 +25,50 @@ enable_thinking: false
 # retry_delay: 5000      # 429 初始退避时间（毫秒）
 # max_retry_delay: 60000 # 429 退避时间上限（毫秒）
 
+# 代理订阅配置（可选）
+# 说明：仅支持导入 HTTP/HTTPS/SOCKS 代理地址，不能直接使用 vmess/vless/trojan 等节点协议。
+# proxy_subscription_refresh_ms: 1800000 # 默认订阅刷新间隔（毫秒）
+# proxy_subscription_timeout_ms: 15000   # 订阅拉取超时（毫秒）
+# proxy_subscription_max_bytes: 2097152 # 单次订阅响应体大小上限（字节）
+# proxy_subscription_api_enabled: false # 远程暴露订阅状态/重载接口；默认仅允许本机访问
+# proxy_subscription_api_token: ""       # 如需远程访问，建议同时配置 x-proxy-subscription-token
+# proxy_subscriptions:
+#   - name: "my-http-pool"
+#     url: "https://example.com/proxies.txt"
+#     enabled: true
+#     refresh_interval_ms: 1800000
+#     format: "auto" # auto / url-list / clash / json
+
+# 机场订阅桥接（可选，需本机已安装 mihomo）
+# airport_runtime_binary_path: "mihomo"
+# airport_runtime_socks_port: 17891
+# airport_runtime_control_port: 17892
+# airport_runtime_work_dir: ".cursor2api-airport"
+# airport_runtime_test_url: "https://www.gstatic.com/generate_204"
+# airport_runtime_test_interval_seconds: 300
+# airport_runtime_log_level: "warning"
+# airport_runtime_mode: "auto" # auto / combined / per-subscription
+# airport_runtime_group_type: "url-test" # url-test / load-balance
+# airport_runtime_group_strategy: "" # load-balance 时可选: round-robin / consistent-hashing / sticky-sessions
+# airport_subscriptions:
+#   - name: "airport-main"
+#     url: "https://example.com/subscription"
+#     enabled: true
+#     interval_seconds: 3600
+#     filter: "(?i)hk|sg|jp"
+#     exclude_filter: "测试"
+#     exclude_type: "http"
+#     headers:
+#       Authorization: "Bearer your-token"
+# 自动模式下也可以直接简写成：
+# airport_subscriptions:
+#   - "https://example.com/subscription"
+#   - name: "airport-us"
+#     url: "https://example.com/subscription"
+#     enabled: true
+#     interval_seconds: 3600
+#     filter: "(?i)us|america"
+
 # 浏览器指纹配置
 fingerprint:
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"

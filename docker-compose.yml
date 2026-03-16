@@ -7,13 +7,14 @@ x-cursor2api-common: &cursor2api-common
   init: true
   stop_grace_period: 20s
   env_file:
-    - .env.docker
+    - ${DOCKER_ENV_FILE:-.env.docker}
   environment:
     NODE_ENV: production
     PORT: 3010
+    AIRPORT_RUNTIME_WORK_DIR: ${AIRPORT_RUNTIME_WORK_DIR:-/app/.cursor2api-airport}
   volumes:
     # 挂载外部配置文件（推荐）——修改后只需 docker compose restart 即可生效
-    - ./config.yaml:/app/config.yaml:ro
+    - ${CONFIG_YAML_PATH:-./config.yaml}:/app/config.yaml:ro
   logging:
     driver: json-file
     options:

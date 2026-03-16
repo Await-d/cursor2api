@@ -63,3 +63,4 @@ logs/
 dist/
 build/
 *.traineddata
+.env.docker

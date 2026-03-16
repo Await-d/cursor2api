@@ -30,6 +30,8 @@
 - **全工具支持** - 无工具白名单限制，支持所有 MCP 工具和自定义扩展
 - **多层拒绝拦截** - 自动检测和抑制 Cursor 文档助手的拒绝行为（工具和非工具模式均生效）
 - **三层身份保护** - 身份探针识别（仅记录）+ 拒绝重试 + 响应清洗，确保输出永远呈现 Claude 身份
+- **🆕 代理订阅自动导入** - 支持通过订阅 URL 自动拉取 HTTP/HTTPS/SOCKS 代理列表并合并进代理池，支持定时刷新与状态查看
+- **🆕 机场订阅桥接** - 支持通过本地 Mihomo 内核消费机场订阅（vmess/vless/trojan/ss 等），并自动暴露本地 SOCKS 入口接入现有代理池
 - **🆕 上下文智能压缩** - 长对话老消息自动压缩（非丢弃），保留因果链语义，压缩率 70-80%
 - **🆕 截断自动续写** - 检测被截断的响应（代码块/XML 未闭合），返回 `max_tokens` 让 Claude Code 自动继续
 - **连续同角色消息自动合并** - 满足 Anthropic API 交替要求，解决 Cursor IDE 发送格式兼容问题
@@ -51,9 +53,37 @@ npm install
 - `cursor_model` - 使用的模型（默认 `anthropic/claude-sonnet-4.6`）
 - `system_prompt_inject` - 可选，给每个请求统一追加一段系统提示词；如果原请求已有 system，会追加在后面
 - `enable_thinking` - 是否启用 `<thinking>...</thinking>` 提取与透传；关闭时代理不会主动注入 Thinking 提示
+- `proxy_pool` - 可选，静态 HTTP/HTTPS/SOCKS 代理地址列表
+- `proxy_subscriptions` - 可选，订阅 URL 列表；启动时自动拉取并定时刷新，把订阅里的 HTTP/HTTPS/SOCKS 代理合并进 `proxy_pool`
+- `proxy_subscription_refresh_ms` - 订阅默认刷新间隔（毫秒，默认 30 分钟）
+- `proxy_subscription_timeout_ms` - 订阅拉取超时（毫秒，默认 15 秒）
+- `proxy_subscription_max_bytes` - 单次订阅响应体大小上限（字节，默认 2 MiB）
+- `proxy_subscription_api_enabled` - 是否允许远程访问订阅状态/重载接口；默认关闭，仅本机可访问
+- `proxy_subscription_api_token` - 订阅状态/重载接口的共享密钥；配置后需通过 `x-proxy-subscription-token` 传入
+- `airport_runtime_binary_path` - Mihomo 可执行文件路径（默认 `mihomo`，要求系统可执行）
+- `airport_runtime_socks_port` - Mihomo 本地 SOCKS 监听端口（默认 `17891`）
+- `airport_runtime_control_port` - Mihomo 本地控制端口（默认 `17892`）
+- `airport_runtime_work_dir` - Mihomo 工作目录（默认 `.cursor2api-airport`）
+- `airport_runtime_test_url` - Mihomo 节点检测 URL
+- `airport_runtime_test_interval_seconds` - Mihomo 节点检测间隔（秒）
+- `airport_runtime_log_level` - Mihomo 日志等级（`silent/error/warning/info/debug`）
+- `airport_runtime_mode` - 机场桥接模式：`auto` 会尝试从单个订阅里自动识别并拆出多个地区入口；`combined` 为单本地入口；`per-subscription` 为每个订阅项生成一个独立本地 SOCKS 入口
+- `airport_runtime_group_type` - Mihomo 策略组类型：`url-test` 或 `load-balance`
+- `airport_runtime_group_strategy` - 当 `airport_runtime_group_type=load-balance` 时可选：`round-robin` / `consistent-hashing` / `sticky-sessions`
+- `airport_subscriptions` - 机场订阅列表；通过本地 Mihomo 运行时消费，支持 `headers/filter/exclude_filter/exclude_type`
 - `fingerprint.user_agent` - 浏览器 User-Agent（模拟 Chrome 请求）
 - `vision.enabled` - 开启视觉拦截 (`true` 发送图片前进行降级处理)。
 - `vision.mode` - 视觉模式。推荐 `ocr` (全自动零配置文字提取)。如需真视觉理解改为 `api` 并配置 `baseUrl` 和 `apiKey` 后接入 Gemini/OpenRouter 等。
+
+订阅导入说明：
+- 支持三类输入：纯文本 URL 列表、Base64 编码的 URL 列表、以及包含 `http` / `https` / `socks*` 节点的 Clash/YAML 或 JSON 结构
+- 对于 `vmess/vless/trojan/ss` 等机场协议，项目现已支持通过 **Mihomo 桥接模式** 使用：程序会生成 Mihomo provider 配置，拉起本地 SOCKS 入口，再把该入口接入现有 `proxyPool`
+- 如果你只想“填一个订阅地址就直接用”，推荐 `airport_runtime_mode: auto`：程序会在启动时轻量读取订阅内容，尝试按地区自动拆出多个本地入口；若分析失败，会自动回退到单入口 combined 模式
+- `auto` 只会在“恰好一个启用订阅且没有手工 filter/exclude 规则”时做自动分组；如果你已经写了多条订阅或显式 filter，系统会保留这些人工拆分边界
+- 如果你希望提高单实例的有效承载能力，可以把 `airport_runtime_group_type` 改成 `load-balance`
+- 如果你希望把一个机场拆成多个本地出口注入 `proxyPool`，可设置 `airport_runtime_mode: per-subscription`，并为同一订阅 URL 写多条不同 `filter` 的订阅项
+- `per-subscription` 模式依赖 Mihomo 的 `listeners` + `proxy` 能力；如果你的 Mihomo 版本不支持该能力，请继续使用 `combined` 模式
+- Mihomo 桥接模式要求本机已安装 `mihomo` 二进制；如果未安装但配置了 `airport_subscriptions`，启动会直接失败并给出明确错误
 
 ### 3. 启动
 
@@ -88,11 +118,19 @@ docker compose up -d --build
 - `cursor2api` → `http://localhost:3010`
 - `cursor2api-2` → `http://localhost:3011`
 
+如需在不改仓库文件的前提下临时切换 Docker 环境变量或配置文件，可在启动前覆盖：
+
+```bash
+DOCKER_ENV_FILE=/tmp/cursor2api.env CONFIG_YAML_PATH=/tmp/cursor2api.yaml docker compose up -d --build
+```
+
 Docker 部署时，运行时环境变量统一从 `.env.docker` 读取；如果你要在容器内开启 Thinking 透传，可直接设置：
 
 ```bash
 ENABLE_THINKING=true
 ```
+
+当前 Docker 镜像已内置 `mihomo`，因此只要配置了 `airport_subscriptions`，容器内即可直接启动机场桥接，不需要再额外挂载 Mihomo 二进制。
 
 Docker 环境下的路由与代理恢复参数也建议在 `.env.docker` 里显式配置：
 
@@ -104,9 +142,59 @@ PROXY_HEALTH_CHECK_INTERVAL_MS=30000
 PROXY_PROBE_TIMEOUT_MS=5000
 PROXY_PAUSE_BASE_MS=15000
 PROXY_PAUSE_MAX_MS=300000
+PROXY_SUBSCRIPTION_REFRESH_MS=1800000
+PROXY_SUBSCRIPTION_TIMEOUT_MS=15000
+PROXY_SUBSCRIPTION_MAX_BYTES=2097152
+PROXY_SUBSCRIPTION_API_ENABLED=false
+PROXY_SUBSCRIPTION_API_TOKEN=
+AIRPORT_RUNTIME_BINARY_PATH=mihomo
+AIRPORT_RUNTIME_SOCKS_PORT=17891
+AIRPORT_RUNTIME_CONTROL_PORT=17892
+AIRPORT_RUNTIME_WORK_DIR=.cursor2api-airport
+AIRPORT_RUNTIME_TEST_URL=https://www.gstatic.com/generate_204
+AIRPORT_RUNTIME_TEST_INTERVAL_SECONDS=300
+AIRPORT_RUNTIME_LOG_LEVEL=warning
+AIRPORT_RUNTIME_MODE=auto
+AIRPORT_RUNTIME_GROUP_TYPE=url-test
+AIRPORT_RUNTIME_GROUP_STRATEGY=
 ```
 
 默认策略：优先直连；直连命中 429 后进入冷却并切换代理；冷却到期后自动恢复直连优先。
+
+如果配置了订阅地址，可用以下接口查看/刷新订阅状态：
+
+```bash
+curl http://localhost:3010/v1/proxy/subscriptions
+curl -X POST http://localhost:3010/v1/proxy/subscriptions/reload
+curl -H "x-proxy-subscription-token: your-token" http://your-host:3010/v1/proxy/subscriptions
+curl http://localhost:3010/v1/airport/runtime
+```
+
+说明：默认只有本机回环地址可以访问这些接口；如需远程访问，请显式开启 `proxy_subscription_api_enabled`，并强烈建议同时配置 `proxy_subscription_api_token`。如果你放在 Nginx/Caddy 等反向代理后面，也建议始终配置 token，不要只依赖回环地址判断。
+
+机场订阅配置示例：
+
+```yaml
+airport_runtime_binary_path: "mihomo"
+airport_runtime_socks_port: 17891
+airport_runtime_mode: "auto"
+airport_subscriptions:
+  - "https://example.com/subscription"
+```
+
+在 `auto` 模式下，程序会尝试读取订阅名称并自动生成地区型本地入口（例如 hk/us/tw/jp/sg/other），只要同一地区检测到可用节点，就会分配一个本地 SOCKS 端口并注入 `proxyPool`。如果自动分析失败，则回退成单本地入口。
+自动分析会复用现有订阅抓取超时和响应体上限，因此不会无限等待或无上限读取机场订阅。
+
+如果你明确希望让同一地区内的请求继续分摊到多个节点，可以在 `auto` 或 `combined` 模式下再额外配置：
+
+```yaml
+airport_runtime_group_type: "load-balance"
+airport_runtime_group_strategy: "round-robin"
+```
+
+在 `per-subscription` 模式下，程序会给每个订阅项生成一个本地 SOCKS 入口，并按 `airport_runtime_socks_port + 2 * index` 分配端口，例如 `17891 / 17893 / 17895 ...`。这些本地入口会一起注入 `proxyPool`，从而让现有的轮询和健康检查真正覆盖多个机场出口。
+
+需要注意：这会提高机场出口多样性和故障隔离能力，但**不会突破应用层的全局并发上限**；请求总并发仍然由 `concurrency` / `RequestQueue` 控制。
 
 容器内监听端口固定为 `3010`，需要调整对外暴露端口时请修改宿主机侧映射（`HOST_PORT_1` / `HOST_PORT_2`），不要改容器内端口。
 
@@ -152,7 +240,9 @@ npm run docker:deploy
 cursor2api/
 ├── src/
 │   ├── index.ts            # 入口 + Express 服务 + 路由
+│   ├── airport-runtime.ts  # Mihomo 机场订阅桥接 + 本地 SOCKS 入口管理
 │   ├── config.ts           # 配置管理
+│   ├── proxy-subscriptions.ts # 代理订阅导入与定时刷新
 │   ├── types.ts            # 类型定义
 │   ├── cursor-client.ts    # Cursor API 客户端 + Chrome TLS 指纹
 │   ├── converter.ts        # 协议转换 + 提示词注入 + 上下文清洗
