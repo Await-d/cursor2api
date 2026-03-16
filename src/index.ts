@@ -7,8 +7,10 @@
 
 import 'dotenv/config';
 import { createRequire } from 'module';
-import express from 'express';
+import express, { type Request, type Response } from 'express';
+import { getAirportRuntimeSnapshot, initAirportRuntime } from './airport-runtime.js';
 import { getConfig } from './config.js';
+import { getProxySubscriptionSnapshot, initProxySubscriptions, reloadProxySubscriptions } from './proxy-subscriptions.js';
 import { initQueue } from './queue.js';
 import { handleMessages, listModels, countTokens } from './handler.js';
 import { handleOpenAIChatCompletions, handleOpenAIResponses } from './openai-handler.js';
@@ -31,6 +33,36 @@ const { version: VERSION } = require('../package.json') as { version: string };
 
 const app = express();
 const config = getConfig();
+
+await initAirportRuntime();
+await initProxySubscriptions();
+
+function isLoopbackAddress(ip?: string): boolean {
+    if (!ip) return false;
+    return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
+function hasForwardedClientAddress(req: Request): boolean {
+    return Boolean(req.header('x-forwarded-for')?.trim() || req.header('x-real-ip')?.trim());
+}
+
+function ensureInternalOpsAccess(req: Request, res: Response): boolean {
+    const localOnlyRequest = isLoopbackAddress(req.ip) && !hasForwardedClientAddress(req);
+    if (!config.proxySubscriptionApiEnabled && !localOnlyRequest) {
+        res.status(403).json({ error: 'Internal ops API is disabled for remote access' });
+        return false;
+    }
+
+    if (config.proxySubscriptionApiToken) {
+        const token = req.header('x-proxy-subscription-token');
+        if (token !== config.proxySubscriptionApiToken) {
+            res.status(401).json({ error: 'Invalid proxy subscription API token' });
+            return false;
+        }
+    }
+
+    return true;
+}
 
 initQueue({
     concurrency: config.concurrency,
@@ -75,6 +107,50 @@ app.post('/messages/count_tokens', countTokens);
 // OpenAI 兼容模型列表
 app.get('/v1/models', listModels);
 
+app.get('/v1/proxy/subscriptions', (_req, res) => {
+    if (!ensureInternalOpsAccess(_req, res)) return;
+    res.json(getProxySubscriptionSnapshot());
+});
+
+app.get('/proxy/subscriptions', (_req, res) => {
+    if (!ensureInternalOpsAccess(_req, res)) return;
+    res.json(getProxySubscriptionSnapshot());
+});
+
+app.post('/v1/proxy/subscriptions/reload', async (_req, res) => {
+    if (!ensureInternalOpsAccess(_req, res)) return;
+    try {
+        const snapshot = await reloadProxySubscriptions('manual');
+        res.json(snapshot);
+    } catch (error) {
+        res.status(500).json({
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
+});
+
+app.post('/proxy/subscriptions/reload', async (_req, res) => {
+    if (!ensureInternalOpsAccess(_req, res)) return;
+    try {
+        const snapshot = await reloadProxySubscriptions('manual');
+        res.json(snapshot);
+    } catch (error) {
+        res.status(500).json({
+            error: error instanceof Error ? error.message : String(error),
+        });
+    }
+});
+
+app.get('/v1/airport/runtime', (_req, res) => {
+    if (!ensureInternalOpsAccess(_req, res)) return;
+    res.json(getAirportRuntimeSnapshot());
+});
+
+app.get('/airport/runtime', (_req, res) => {
+    if (!ensureInternalOpsAccess(_req, res)) return;
+    res.json(getAirportRuntimeSnapshot());
+});
+
 // 健康检查
 app.get('/health', (_req, res) => {
     res.json({ status: 'ok', version: VERSION });
@@ -91,6 +167,9 @@ app.get('/', (_req, res) => {
             openai_chat: 'POST /v1/chat/completions',
             openai_responses: 'POST /v1/responses',
             models: 'GET /v1/models',
+            proxy_subscriptions: 'GET /v1/proxy/subscriptions',
+            proxy_subscriptions_reload: 'POST /v1/proxy/subscriptions/reload',
+            airport_runtime: 'GET /v1/airport/runtime',
             health: 'GET /health',
         },
         usage: {
