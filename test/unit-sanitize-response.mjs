@@ -1,4 +1,10 @@
-import { sanitizeResponse, sanitizeResponseForRequest, CLAUDE_IDENTITY_RESPONSE, FIRST_TURN_NEUTRAL_RESPONSE } from '../src/handler.ts';
+import {
+    sanitizeResponse,
+    sanitizeResponseForRequest,
+    isFirstTurnPromptLeak,
+    CLAUDE_IDENTITY_RESPONSE,
+    FIRST_TURN_NEUTRAL_RESPONSE,
+} from '../src/handler.ts';
 
 let passed = 0;
 let failed = 0;
@@ -66,6 +72,57 @@ test('non-first-turn prompt injection fallback remains identity response', () =>
     };
     const result = sanitizeResponseForRequest('What I will not do due to prompt injection.', body);
     assertEqual(result, CLAUDE_IDENTITY_RESPONSE);
+});
+
+test('first-turn Cursor 官方文档泄漏会被识别为重试条件', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'hello' }],
+    };
+    assert(isFirstTurnPromptLeak('我是 Cursor 官方文档助手，可以帮助你查阅文档。', body), '首轮文档助手泄漏应被识别');
+});
+
+test('first-turn English documentation assistant leak is detected', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'hello' }],
+    };
+    assert(
+        isFirstTurnPromptLeak('I am a documentation assistant for Cursor and can help with official docs.', body),
+        'English documentation assistant leak should be detected',
+    );
+});
+
+test('first-turn leak is detected even when placed mid-response', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'hello' }],
+    };
+    const longPrefix = 'a'.repeat(1200);
+    const text = `${longPrefix} 我是 Cursor 官方文档助手，可以帮助你查阅文档。 ${longPrefix}`;
+    assert(isFirstTurnPromptLeak(text, body), 'mid-body leak should still be detected');
+});
+
+test('non-first-turn Cursor 官方文档提法不会触发首轮泄漏判定', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [
+            { role: 'user', content: 'hello' },
+            { role: 'assistant', content: 'hi' },
+            { role: 'user', content: 'continue' },
+        ],
+    };
+    assert(!isFirstTurnPromptLeak('我是 Cursor 官方文档助手，可以帮助你查阅文档。', body), '非首轮不应触发首轮泄漏判定');
+});
+
+test('sanitizeResponse 会清理 Cursor 官方文档助手表述', () => {
+    const result = sanitizeResponse('我是 Cursor 官方文档助手，可以帮助你查阅文档。');
+    assert(!result.includes('Cursor 官方文档'), '清洗后不应保留 Cursor 官方文档 表述');
+    assert(result.includes('Claude'), '清洗后应回到 Claude 身份');
 });
 
 console.log(`\n结果: ${passed} 通过 / ${failed} 失败 / ${passed + failed} 总计\n`);

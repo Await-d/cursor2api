@@ -35,9 +35,11 @@ import {
     sanitizeResponseForRequest,
     isIdentityProbe,
     isToolCapabilityQuestion,
+    isFirstTurnPromptLeak,
     buildRetryRequest,
     CLAUDE_IDENTITY_RESPONSE,
     CLAUDE_TOOLS_RESPONSE,
+    FIRST_TURN_NEUTRAL_RESPONSE,
     MAX_REFUSAL_RETRIES,
     getOpenAIToolFinishReason,
     resolveToolResponse,
@@ -565,23 +567,28 @@ async function handleOpenAIStream(
         console.log(`[OpenAI] 原始响应 (${fullResponse.length} chars, tools=${hasTools}): ${fullResponse.substring(0, 200)}${fullResponse.length > 200 ? '...' : ''}`);
 
         // 拒绝检测 + 自动重试（工具模式和非工具模式均生效）
-        const shouldRetryRefusal = () => {
+        const shouldRetryResponse = () => {
             const candidate = extractThinkingIfEnabled(fullResponse, thinkingEnabled).cleanText;
+            if (isFirstTurnPromptLeak(candidate, anthropicReq)) return true;
             if (!isLikelyRefusal(candidate)) return false;
             if (hasTools && hasToolCalls(fullResponse)) return false;
             return true;
         };
 
-        while (shouldRetryRefusal() && retryCount < MAX_REFUSAL_RETRIES) {
+        while (shouldRetryResponse() && retryCount < MAX_REFUSAL_RETRIES) {
             retryCount++;
-            console.log(`[OpenAI] 检测到拒绝（第${retryCount}次），自动重试...原始: ${fullResponse.substring(0, 100)}`);
+            console.log(`[OpenAI] 检测到首轮泄漏/拒绝（第${retryCount}次），自动重试...原始: ${fullResponse.substring(0, 100)}`);
             const retryBody = buildRetryRequest(anthropicReq, retryCount - 1);
             activeCursorReq = await convertToCursorRequest(retryBody);
             await executeStream();
         }
-        if (shouldRetryRefusal()) {
+        if (shouldRetryResponse()) {
+            const leakedFirstTurn = isFirstTurnPromptLeak(extractThinkingIfEnabled(fullResponse, thinkingEnabled).cleanText, anthropicReq);
             if (!hasTools) {
-                if (isToolCapabilityQuestion(anthropicReq)) {
+                if (leakedFirstTurn) {
+                    console.log('[OpenAI] 首轮提示词泄漏重试后仍存在，返回中性首轮回复');
+                    fullResponse = FIRST_TURN_NEUTRAL_RESPONSE;
+                } else if (isToolCapabilityQuestion(anthropicReq)) {
                     console.log(`[OpenAI] 工具能力询问被拒绝，返回 Claude 能力描述`);
                     fullResponse = CLAUDE_TOOLS_RESPONSE;
                 } else {
@@ -589,7 +596,7 @@ async function handleOpenAIStream(
                     fullResponse = CLAUDE_IDENTITY_RESPONSE;
                 }
             } else {
-                console.log(`[OpenAI] 工具模式下拒绝且无工具调用，引导模型输出`);
+                console.log(`[OpenAI] 工具模式下首轮泄漏/拒绝且无工具调用，引导模型输出`);
                 fullResponse = 'I understand the request. Let me analyze the information and proceed with the appropriate action.';
             }
         }
@@ -811,7 +818,11 @@ async function handleOpenAINonStream(
     console.log(`[OpenAI] 非流式原始响应 (${fullText.length} chars, tools=${hasTools}): ${fullText.substring(0, 300)}${fullText.length > 300 ? '...' : ''}`);
 
     // 拒绝检测 + 自动重试（工具模式和非工具模式均生效）
-    const shouldRetry = () => isLikelyRefusal(extractThinkingIfEnabled(fullText, thinkingEnabled).cleanText) && !(hasTools && hasToolCalls(fullText));
+    const shouldRetry = () => {
+        const candidate = extractThinkingIfEnabled(fullText, thinkingEnabled).cleanText;
+        if (isFirstTurnPromptLeak(candidate, anthropicReq)) return true;
+        return isLikelyRefusal(candidate) && !(hasTools && hasToolCalls(fullText));
+    };
 
     if (shouldRetry()) {
         for (let attempt = 0; attempt < MAX_REFUSAL_RETRIES; attempt++) {
@@ -823,9 +834,13 @@ async function handleOpenAINonStream(
             if (!shouldRetry()) break;
         }
         if (shouldRetry()) {
+            const leakedFirstTurn = isFirstTurnPromptLeak(extractThinkingIfEnabled(fullText, thinkingEnabled).cleanText, anthropicReq);
             if (hasTools) {
-                console.log(`[OpenAI] 非流式：工具模式下拒绝，引导模型输出`);
+                console.log(`[OpenAI] 非流式：工具模式下首轮泄漏/拒绝，引导模型输出`);
                 fullText = 'I understand the request. Let me analyze the information and proceed with the appropriate action.';
+            } else if (leakedFirstTurn) {
+                console.log('[OpenAI] 非流式：首轮提示词泄漏重试后仍存在，返回中性首轮回复');
+                fullText = FIRST_TURN_NEUTRAL_RESPONSE;
             } else if (isToolCapabilityQuestion(anthropicReq)) {
                 console.log(`[OpenAI] 非流式：工具能力询问被拒绝，返回 Claude 能力描述`);
                 fullText = CLAUDE_TOOLS_RESPONSE;
