@@ -4,8 +4,10 @@
  * 将 Cursor 文档页免费 AI 接口代理为 Anthropic Messages API
  * 通过提示词注入让 Claude Code 拥有完整工具调用能力
  */
-
 import 'dotenv/config';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+initWebLogger();
 import { createRequire } from 'module';
 import express, { type Request, type Response } from 'express';
 import { getAirportRuntimeSnapshot, initAirportRuntime } from './airport-runtime.js';
@@ -14,6 +16,10 @@ import { getProxySubscriptionSnapshot, initProxySubscriptions, reloadProxySubscr
 import { initQueue } from './queue.js';
 import { handleMessages, listModels, countTokens } from './handler.js';
 import { handleOpenAIChatCompletions, handleOpenAIResponses } from './openai-handler.js';
+import { initWebLogger, getRecentLogs, registerSseClient } from './web-logger.js';
+import { handleGetConfig, handlePostConfig, handleGetRunningConfig } from './admin-config.js';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 
 // 统一日志时间戳
 (() => {
@@ -150,6 +156,18 @@ app.get('/airport/runtime', (_req, res) => {
     if (!ensureInternalOpsAccess(_req, res)) return;
     res.json(getAirportRuntimeSnapshot());
 });
+
+
+
+const publicDir = join(__dirname, __dirname.endsWith('/src') ? 'public' : '../src/public');
+app.get('/admin/logs', (_req, res) => { registerSseClient(res); });
+app.get('/admin/logs/snapshot', (_req, res) => { res.json({ logs: getRecentLogs() }); });
+app.get('/admin/config', handleGetConfig);
+app.post('/admin/config', handlePostConfig);
+app.get('/admin/config/running', handleGetRunningConfig);
+app.post('/admin/chat', (req, res) => { handleMessages(req, res); });
+app.use('/admin', express.static(publicDir, { index: 'index.html' }));
+app.get('/admin', (_req, res) => { res.redirect(301, '/admin/'); });
 
 // 健康检查
 app.get('/health', (_req, res) => {

@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cursor2API 管理面板</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#050709;
+  --s1:#0b0f17;
+  --s2:#111827;
+  --s3:#1a2234;
+  --border:#1e2d42;
+  --border2:#253447;
+  --text:#f1f5f9;
+  --text2:#94a3b8;
+  --text3:#4b6080;
+  --blue:#4f8ef7;
+  --blue2:#7cb3ff;
+  --blue-bg:#0d1f3c;
+  --purple:#9d73f5;
+  --purple-bg:#150f2a;
+  --green:#34d399;
+  --yellow:#fbbf24;
+  --red:#f87171;
+  --red-bg:#200a0a;
+  --r:8px;--r2:6px;--r3:12px;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei','Segoe UI',sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#1e3a5a;border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:#2d5180}
+
+.header{
+  height:52px;background:var(--s1);border-bottom:1px solid var(--border);
+  padding:0 20px;display:flex;align-items:center;gap:16px;flex-shrink:0;
+  background:linear-gradient(90deg,#080d16,#0b1220);
+}
+.logo{display:flex;align-items:center;gap:10px;text-decoration:none}
+.logo-mark{
+  width:30px;height:30px;border-radius:8px;
+  background:linear-gradient(135deg,#2563eb,#7c3aed);
+  display:flex;align-items:center;justify-content:center;
+  font-size:15px;box-shadow:0 0 16px #2563eb44;
+}
+.logo-name{font-size:14px;font-weight:700;letter-spacing:-.2px;color:var(--text)}
+.logo-sub{font-size:11px;color:var(--text3);background:var(--s3);border:1px solid var(--border);padding:1px 8px;border-radius:99px}
+
+.nav{display:flex;gap:1px;margin-left:auto;padding:3px;background:var(--s2);border:1px solid var(--border);border-radius:10px}
+.tab-btn{
+  padding:5px 16px;border:none;background:transparent;color:var(--text2);
+  border-radius:7px;cursor:pointer;font-size:13px;font-weight:500;
+  transition:all .15s;letter-spacing:.1px;
+}
+.tab-btn:hover:not(.active){color:var(--text);background:#1a2538}
+.tab-btn.active{background:linear-gradient(135deg,#1e3a7a,#2d1d5a);color:var(--text);box-shadow:0 1px 8px #2563eb30}
+
+.main{flex:1;overflow:hidden;position:relative}
+.tab-panel{display:none;position:absolute;inset:0;flex-direction:column;padding:16px;gap:12px}
+.tab-panel.active{display:flex}
+
+.toast{position:fixed;top:16px;right:16px;padding:10px 16px;border-radius:var(--r);font-size:13px;z-index:9999;opacity:0;transition:all .2s;pointer-events:none;transform:translateX(6px)}
+.toast.show{opacity:1;transform:translateX(0)}
+.toast.ok{background:#0a2318;border:1px solid #065f46;color:#6ee7b7}
+.toast.err{background:var(--red-bg);border:1px solid #7f1d1d;color:#fca5a5}
+
+button{
+  display:inline-flex;align-items:center;justify-content:center;gap:5px;
+  padding:6px 13px;border-radius:var(--r2);border:1px solid var(--border2);
+  background:var(--s2);color:var(--text2);cursor:pointer;font-size:13px;font-weight:500;
+  transition:all .12s;white-space:nowrap;
+}
+button:hover{background:var(--s3);color:var(--text);border-color:#2d4460;transform:translateY(-1px)}
+button:active{transform:translateY(0)}
+.btn-p{background:linear-gradient(135deg,#1d4ed8,#4338ca);border-color:#3b5bd9;color:#fff}
+.btn-p:hover{background:linear-gradient(135deg,#2563eb,#4f46e5);border-color:#4f8ef7}
+.btn-d{background:var(--red-bg);border-color:#450a0a;color:#fca5a5}
+.btn-d:hover{background:#2a0808;border-color:#7f1d1d}
+
+input[type=text],input[type=number],select,textarea{
+  background:var(--s1);border:1px solid var(--border);color:var(--text);
+  padding:7px 11px;border-radius:var(--r2);font-size:13px;
+  font-family:inherit;outline:none;width:100%;transition:all .15s;
+}
+input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px #4f8ef714}
+select{cursor:pointer;background-image:none}
+label{font-size:12px;color:var(--text3);display:block;margin-bottom:5px;font-weight:500;letter-spacing:.2px}
+
+.card{background:var(--s2);border:1px solid var(--border);border-radius:var(--r3);padding:16px}
+.sec-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--text3);margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.sec-title::after{content:'';flex:1;height:1px;background:var(--border)}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo">
+    <div class="logo-mark">⚡</div>
+    <span class="logo-name">Cursor2API</span>
+    <span class="logo-sub">管理面板</span>
+  </div>
+  <nav class="nav">
+    <button class="tab-btn active" data-tab="chat">💬 对话测试</button>
+    <button class="tab-btn" data-tab="logs">📋 运行日志</button>
+    <button class="tab-btn" data-tab="config">⚙️ 配置管理</button>
+  </nav>
+</div>
+<div class="main">
+<style>
+#chat-panel{gap:0}
+.chat-topbar{
+  background:var(--s2);border:1px solid var(--border);
+  border-radius:var(--r3) var(--r3) 0 0;border-bottom:none;
+  padding:10px 14px;display:flex;align-items:center;gap:10px;flex-shrink:0;
+}
+.chat-topbar label{margin:0;white-space:nowrap;font-size:12px}
+.chat-topbar input{max-width:260px;font-size:13px}
+.chat-hint{margin-left:auto;font-size:11px;color:var(--text3);white-space:nowrap}
+.chat-body{
+  flex:1;overflow:hidden;display:flex;flex-direction:column;
+  background:var(--s1);border:1px solid var(--border);
+  border-radius:0 0 var(--r3) var(--r3);
+}
+.chat-msgs{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:12px}
+.chat-empty{
+  flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  color:var(--text3);gap:10px;
+}
+.chat-empty .ei{font-size:36px;opacity:.3}
+.chat-empty p{font-size:14px}
+.msg{max-width:78%;padding:10px 14px;border-radius:12px;font-size:14px;line-height:1.7;word-break:break-word;white-space:pre-wrap;animation:mi .18s ease}
+@keyframes mi{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+.msg.user{align-self:flex-end;background:linear-gradient(135deg,#1e3a8a,#312e81);border-bottom-right-radius:3px;box-shadow:0 2px 16px #1e3a8a50}
+.msg.assistant{align-self:flex-start;background:var(--s2);border:1px solid var(--border);border-left:2px solid var(--blue);border-bottom-left-radius:3px}
+.msg.thinking-block{align-self:flex-start;max-width:86%;background:var(--purple-bg);border:1px solid #2d1f4e;border-left:2px solid var(--purple);border-bottom-left-radius:3px;font-size:12px;color:#c4b5fd}
+.msg.thinking-block::before{content:'🧠 推理过程';display:block;font-size:11px;font-weight:600;color:var(--purple);margin-bottom:5px;opacity:.7}
+.msg.error-msg{align-self:center;background:var(--red-bg);border:1px solid #450a0a;color:var(--red);font-size:13px}
+.chat-bottom{
+  display:flex;gap:8px;padding:10px;border-top:1px solid var(--border);
+  background:var(--s2);flex-shrink:0;
+}
+.chat-bottom textarea{
+  flex:1;resize:none;min-height:40px;max-height:140px;background:var(--s1);
+  border-radius:var(--r2);line-height:1.5;
+}
+</style>
+<div id="chat-panel" class="tab-panel active">
+  <div class="chat-topbar">
+    <label>模型</label>
+    <input id="chat-model" type="text" value="claude-sonnet-4-20250514">
+    <span class="chat-hint">Enter 发送 &nbsp;·&nbsp; Shift+Enter 换行</span>
+  </div>
+  <div class="chat-body">
+    <div class="chat-msgs" id="chat-messages">
+      <div class="chat-empty" id="chat-empty"><div class="ei">💬</div><p>开始与 AI 对话</p></div>
+    </div>
+    <div class="chat-bottom">
+      <textarea id="chat-input" placeholder="输入消息..."></textarea>
+      <button class="btn-p" id="chat-send" style="padding:8px 16px">发送 ↑</button>
+      <button id="chat-clear" title="清空对话">🗑</button>
+    </div>
+  </div>
+</div>
+<style>
+#logs-panel{gap:0}
+.log-bar{
+  background:var(--s2);border:1px solid var(--border);
+  border-radius:var(--r3) var(--r3) 0 0;border-bottom:none;
+  padding:9px 14px;display:flex;align-items:center;gap:10px;flex-shrink:0;
+}
+.sdot{width:7px;height:7px;border-radius:50%;background:var(--green);flex-shrink:0}
+.sdot.on{animation:pp 2s infinite;box-shadow:0 0 7px var(--green)}
+.sdot.off{background:var(--yellow);box-shadow:0 0 7px var(--yellow)}
+@keyframes pp{0%,100%{opacity:1}50%{opacity:.35}}
+#log-status{font-size:12px;color:var(--text3)}
+.log-bar select{width:auto;padding:4px 9px;font-size:12px}
+.sw-wrap{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text3)}
+.sw{appearance:none;width:30px;height:16px;background:var(--border);border-radius:99px;position:relative;cursor:pointer;border:none;outline:none;transition:background .18s;flex-shrink:0}
+.sw:checked{background:var(--blue)}
+.sw::after{content:'';position:absolute;top:2px;left:2px;width:12px;height:12px;background:#fff;border-radius:50%;transition:transform .18s}
+.sw:checked::after{transform:translateX(14px)}
+.log-body{
+  flex:1;overflow-y:auto;background:#030508;
+  border:1px solid var(--border);border-radius:0 0 var(--r3) var(--r3);
+  font-family:'SF Mono','Cascadia Code',Consolas,monospace;font-size:12px;
+}
+.le{display:grid;grid-template-columns:158px 44px 1fr;gap:8px;padding:3px 14px;border-bottom:1px solid #0a0e17;align-items:baseline;line-height:1.65}
+.le:hover{background:#090e18}
+.lts{color:#1e3a58;font-size:11px}
+.lb{display:inline-block;padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;text-align:center;letter-spacing:.03em}
+.lb.log{background:#0f1d2e;color:#4b7ab8}
+.lb.info{background:#052816;color:#34d399}
+.lb.warn{background:#1c1505;color:#fbbf24}
+.lb.error{background:#1a0303;color:#f87171}
+.lm{color:#b0bec5;word-break:break-all;white-space:pre-wrap}
+</style>
+<div id="logs-panel" class="tab-panel">
+  <div class="log-bar">
+    <div class="sdot on" id="log-dot"></div>
+    <span id="log-status">连接中...</span>
+    <select id="log-level-filter" style="width:100px">
+      <option value="">全部级别</option>
+      <option value="log">LOG</option>
+      <option value="info">INFO</option>
+      <option value="warn">WARN</option>
+      <option value="error">ERROR</option>
+    </select>
+    <div class="sw-wrap">
+      <input type="checkbox" class="sw" id="log-autoscroll" checked>
+      <label for="log-autoscroll">自动滚动</label>
+    </div>
+    <button id="log-clear" class="btn-d" style="margin-left:auto;padding:5px 11px;font-size:12px">清空</button>
+  </div>
+  <div class="log-body" id="log-container"></div>
+</div>
+<style>
+#config-panel{overflow-y:auto;gap:14px}
+.cfg-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.cfg-field{display:flex;flex-direction:column}
+.cfg-field.full{grid-column:1/-1}
+.cfg-chk{display:flex;align-items:center;gap:8px}
+.cfg-chk label{margin:0;font-size:13px;color:var(--text);cursor:pointer}
+.cfg-chk input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--blue);flex-shrink:0}
+.v-hdr{grid-column:1/-1;padding:12px 0 4px;border-top:1px solid var(--border);margin-top:4px;display:flex;align-items:center;gap:8px}
+.v-hdr span{
+  font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;
+  background:linear-gradient(135deg,var(--purple),#c084fc);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+}
+.cfg-acts{display:flex;gap:8px;align-items:center;margin-top:14px}
+.json-box{
+  background:#030508;border:1px solid var(--border);border-radius:var(--r2);
+  padding:12px 14px;font-family:'SF Mono','Cascadia Code',Consolas,monospace;
+  font-size:11.5px;overflow-y:auto;max-height:260px;line-height:1.75;
+}
+.jk{color:#60a5fa}.js{color:#4ade80}.jn{color:#fb923c}.jb{color:#f472b6}.jnu{color:#64748b}
+.cfg-slabel{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--text3);margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+</style>
+<div id="config-panel" class="tab-panel">
+  <div class="card">
+    <div class="cfg-slabel">基础配置</div>
+    <div class="cfg-grid">
+      <div class="cfg-field"><label>服务端口</label><input type="number" id="cfg-port" placeholder="3010"></div>
+      <div class="cfg-field"><label>请求超时（秒）</label><input type="number" id="cfg-timeout" placeholder="120"></div>
+      <div class="cfg-field full"><label>Cursor 模型</label><input type="text" id="cfg-cursor-model" placeholder="anthropic/claude-sonnet-4.6"></div>
+      <div class="cfg-field"><label>最大并发数</label><input type="number" id="cfg-concurrency" placeholder="3"></div>
+      <div class="cfg-field"><label>队列超时（ms）</label><input type="number" id="cfg-queue-timeout" placeholder="120000"></div>
+      <div class="cfg-field"><label>重试初始延迟（ms）</label><input type="number" id="cfg-retry-delay" placeholder="5000"></div>
+      <div class="cfg-field"><label>重试最大延迟（ms）</label><input type="number" id="cfg-max-retry-delay" placeholder="60000"></div>
+      <div class="cfg-field"><label>直连 429 冷却（ms）</label><input type="number" id="cfg-direct429" placeholder="10000"></div>
+      <div class="cfg-field"><label>代理健康检查间隔（ms）</label><input type="number" id="cfg-proxy-hc" placeholder="30000"></div>
+      <div class="cfg-field"><label>代理探测超时（ms）</label><input type="number" id="cfg-proxy-probe" placeholder="5000"></div>
+      <div class="cfg-field"><label>代理暂停基础（ms）</label><input type="number" id="cfg-proxy-pause-base" placeholder="15000"></div>
+      <div class="cfg-field"><label>代理暂停上限（ms）</label><input type="number" id="cfg-proxy-pause-max" placeholder="300000"></div>
+      <div class="cfg-field"><label>代理地址</label><input type="text" id="cfg-proxy" placeholder="http://127.0.0.1:7890"></div>
+      <div class="cfg-field full"><label>代理池（每行一个）</label><textarea id="cfg-proxy-pool" style="min-height:60px" placeholder="http://proxy1:port"></textarea></div>
+      <div class="cfg-field full"><label>系统提示词追加</label><textarea id="cfg-system-prompt" style="min-height:60px"></textarea></div>
+      <div class="cfg-field full cfg-chk"><input type="checkbox" id="cfg-enable-thinking"><label for="cfg-enable-thinking">启用思考模式（enable_thinking）</label></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="cfg-slabel">代理订阅配置</div>
+    <div class="cfg-grid">
+      <div class="cfg-field"><label>订阅刷新间隔（ms）</label><input type="number" id="cfg-sub-refresh" placeholder="1800000"></div>
+      <div class="cfg-field"><label>订阅拉取超时（ms）</label><input type="number" id="cfg-sub-timeout" placeholder="15000"></div>
+      <div class="cfg-field full"><label>订阅响应体上限（字节）</label><input type="number" id="cfg-sub-maxbytes" placeholder="2097152"></div>
+      <div class="cfg-field full cfg-chk"><input type="checkbox" id="cfg-sub-api-enabled"><label for="cfg-sub-api-enabled">允许远程访问订阅状态接口</label></div>
+      <div class="cfg-field full"><label>订阅接口鉴权 Token</label><input type="text" id="cfg-sub-api-token" placeholder="留空则不校验"></div>
+      <div class="cfg-field full"><label>HTTP/SOCKS 代理订阅列表（JSON 数组，每项含 url/name/enabled/refresh_interval_ms/format）</label><textarea id="cfg-proxy-subscriptions" style="min-height:80px;font-family:monospace;font-size:12px" placeholder='[{"url": "https://example.com/proxies.txt", "name": "my-pool", "enabled": true}]'></textarea></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="cfg-slabel">机场订阅 / Mihomo 配置</div>
+    <div class="cfg-grid">
+      <div class="cfg-field full"><label>Mihomo 可执行文件路径</label><input type="text" id="cfg-airport-bin" placeholder="mihomo"></div>
+      <div class="cfg-field"><label>本地 SOCKS 端口</label><input type="number" id="cfg-airport-socks" placeholder="17891"></div>
+      <div class="cfg-field"><label>控制端口</label><input type="number" id="cfg-airport-ctrl" placeholder="17892"></div>
+      <div class="cfg-field full"><label>工作目录</label><input type="text" id="cfg-airport-workdir" placeholder=".cursor2api-airport"></div>
+      <div class="cfg-field full"><label>连通性检测 URL</label><input type="text" id="cfg-airport-testurl" placeholder="https://www.gstatic.com/generate_204"></div>
+      <div class="cfg-field"><label>节点检测间隔（秒）</label><input type="number" id="cfg-airport-interval" placeholder="300"></div>
+      <div class="cfg-field"><label>日志等级</label>
+        <select id="cfg-airport-loglevel">
+          <option value="silent">silent</option>
+          <option value="error">error</option>
+          <option value="warning">warning</option>
+          <option value="info">info</option>
+          <option value="debug">debug</option>
+        </select>
+      </div>
+      <div class="cfg-field"><label>运行模式</label>
+        <select id="cfg-airport-mode">
+          <option value="auto">auto（自动分区）</option>
+          <option value="combined">combined（单入口）</option>
+          <option value="per-subscription">per-subscription（每订阅独立）</option>
+        </select>
+      </div>
+      <div class="cfg-field"><label>策略组类型</label>
+        <select id="cfg-airport-grouptype">
+          <option value="url-test">url-test</option>
+          <option value="load-balance">load-balance</option>
+        </select>
+      </div>
+      <div class="cfg-field"><label>负载均衡策略</label>
+        <select id="cfg-airport-groupstrategy">
+          <option value="">默认</option>
+          <option value="round-robin">round-robin</option>
+          <option value="consistent-hashing">consistent-hashing</option>
+          <option value="sticky-sessions">sticky-sessions</option>
+        </select>
+      </div>
+    </div>
+    <div style="margin-top:16px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <label style="margin:0;font-size:13px;color:var(--text);font-weight:600">机场订阅列表</label>
+        <button type="button" id="airport-sub-add" style="padding:4px 12px;font-size:12px">+ 添加订阅</button>
+      </div>
+      <div id="airport-sub-list" style="display:flex;flex-direction:column;gap:10px"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="cfg-slabel">模型映射（model_mapping）</div>
+    <div class="cfg-grid">
+      <div class="cfg-field full"><label>JSON 格式，key 为客户端模型名，value 为实际模型名，* 表示默认</label><textarea id="cfg-model-mapping" style="min-height:120px" placeholder='{"claude-3-5-sonnet": "anthropic/claude-sonnet-4.6", "*": "anthropic/claude-sonnet-4.6"}'></textarea></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="cfg-slabel">浏览器指纹</div>
+    <div class="cfg-grid">
+      <div class="cfg-field full"><label>User-Agent</label><input type="text" id="cfg-ua" placeholder="Mozilla/5.0 ..."></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="cfg-slabel">视觉处理设置</div>
+    <div class="cfg-grid">
+      <div class="cfg-field cfg-chk"><input type="checkbox" id="cfg-vision-enabled"><label for="cfg-vision-enabled">启用视觉处理降级</label></div>
+      <div class="cfg-field"><label>处理模式</label>
+        <select id="cfg-vision-mode">
+          <option value="ocr">ocr（本地 OCR，零配置）</option>
+          <option value="api">api（外部视觉模型）</option>
+        </select>
+      </div>
+      <div class="cfg-field full"><label>API 地址</label><input type="text" id="cfg-vision-baseurl" placeholder="https://api.openai.com/v1/chat/completions"></div>
+      <div class="cfg-field"><label>API 密钥</label><input type="text" id="cfg-vision-apikey" placeholder="sk-..."></div>
+      <div class="cfg-field"><label>视觉模型</label><input type="text" id="cfg-vision-model" placeholder="gpt-4o-mini"></div>
+    </div>
+  </div>
+  <div class="card" style="position:sticky;bottom:0;background:var(--s2);border-top:2px solid var(--border2)">
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn-p" id="cfg-save">💾 保存配置</button>
+      <button id="cfg-reload">↺ 重新加载</button>
+      <span style="font-size:12px;color:var(--text3);margin-left:4px">保存后需重启服务生效</span>
+    </div>
+  </div>
+  <div class="card">
+    <div class="cfg-slabel">当前运行配置（只读）</div>
+    <div class="json-box" id="running-json">加载中...</div>
+  </div>
+</div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+function showToast(msg,ok){
+  const t=$('toast');t.textContent=msg;
+  t.className='toast '+(ok?'ok':'err')+' show';
+  clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),3200);
+}
+document.querySelector('.nav').addEventListener('click',e=>{
+  const btn=e.target.closest('.tab-btn');if(!btn)return;
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+  btn.classList.add('active');
+  $(btn.dataset.tab+'-panel').classList.add('active');
+  if(btn.dataset.tab==='config')loadConfig();
+});
+const chatMsgs=$('chat-messages'),chatInput=$('chat-input'),chatEmpty=$('chat-empty');
+let chatHist=[];
+function appendMsg(role,text,cls){
+  if(chatEmpty)chatEmpty.style.display='none';
+  const d=document.createElement('div');d.className='msg '+(cls||role);
+  d.textContent=text;chatMsgs.appendChild(d);chatMsgs.scrollTop=chatMsgs.scrollHeight;return d;
+}
+async function sendChat(){
+  const text=chatInput.value.trim();if(!text)return;
+  chatInput.value='';chatInput.style.height='40px';
+  chatHist.push({role:'user',content:text});appendMsg('user',text);
+  const model=$('chat-model').value||'claude-sonnet-4-20250514';
+  const thEl=appendMsg('assistant','','thinking-block');thEl.style.display='none';
+  const asEl=appendMsg('assistant','...');
+  try{
+    const r=await fetch('/admin/chat',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','x-api-key':'sk-dummy','anthropic-version':'2023-06-01'},
+      body:JSON.stringify({model,max_tokens:4096,stream:true,messages:chatHist})
+    });
+    if(!r.ok){const e=await r.text();asEl.textContent='错误: '+r.status+' '+e;asEl.className='msg error-msg';return;}
+    const reader=r.body.getReader(),dec=new TextDecoder();
+    let buf='',full='',think='';
+    asEl.textContent='';
+    while(true){
+      const{done,value}=await reader.read();if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      const lines=buf.split('\n');buf=lines.pop();
+      for(const line of lines){
+        if(!line.startsWith('data:'))continue;
+        const d=line.slice(5).trim();if(d==='[DONE]')continue;
+        try{
+          const ev=JSON.parse(d);
+          if(ev.type==='content_block_delta'){
+            if(ev.delta&&ev.delta.type==='text_delta'){full+=ev.delta.text;asEl.textContent=full;chatMsgs.scrollTop=chatMsgs.scrollHeight;}
+            else if(ev.delta&&ev.delta.type==='thinking_delta'){think+=ev.delta.thinking;thEl.textContent=think;thEl.style.display='';}
+          }
+        }catch(e){}
+      }
+    }
+    if(full)chatHist.push({role:'assistant',content:full});
+    if(!full)asEl.textContent='(空响应)';
+  }catch(err){asEl.textContent='请求失败: '+err.message;asEl.className='msg error-msg';}
+}
+$('chat-send').addEventListener('click',sendChat);
+$('chat-clear').addEventListener('click',()=>{chatMsgs.innerHTML='';chatMsgs.appendChild(chatEmpty);chatEmpty.style.display='';chatHist=[];});
+chatInput.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}});
+chatInput.addEventListener('input',function(){this.style.height='40px';this.style.height=Math.min(this.scrollHeight,140)+'px';});
+const logCon=$('log-container'),logFil=$('log-level-filter'),logAs=$('log-autoscroll'),logSt=$('log-status'),logDot=$('log-dot');
+let logArr=[];
+const MAX_LOG=2000;
+function lc(l){return{log:'log',info:'info',warn:'warn',error:'error'}[l]||'log';}
+function mkLogEl(e){
+  const d=document.createElement('div');d.className='le';d.dataset.level=e.level;
+  const ts=document.createElement('span');ts.className='lts';ts.textContent=e.ts.replace('T',' ').replace('Z','').slice(0,23);
+  const lv=document.createElement('span');lv.className='lb '+lc(e.level);lv.textContent=e.level.toUpperCase();
+  const msg=document.createElement('span');msg.className='lm';msg.textContent=e.msg;
+  d.appendChild(ts);d.appendChild(lv);d.appendChild(msg);return d;
+}
+function applyFil(){
+  const f=logFil.value;
+  logCon.querySelectorAll('.le').forEach(el=>{el.style.display=(!f||el.dataset.level===f)?'':'none';});
+}
+function addLog(e){
+  logArr.push(e);
+  if(logArr.length>MAX_LOG){logArr.shift();if(logCon.firstChild)logCon.removeChild(logCon.firstChild);}
+  const f=logFil.value,el=mkLogEl(e);
+  if(f&&e.level!==f)el.style.display='none';
+  logCon.appendChild(el);
+  if(logAs.checked)logCon.scrollTop=logCon.scrollHeight;
+}
+fetch('/admin/logs/snapshot').then(r=>r.json()).then(d=>{if(d.logs)d.logs.forEach(addLog);}).catch(()=>{});
+let sse=null;
+function connectLogs(){
+  if(sse)sse.close();
+  sse=new EventSource('/admin/logs');
+  logSt.textContent='已连接';logDot.className='sdot on';
+  sse.onmessage=e=>{try{addLog(JSON.parse(e.data));}catch(err){}};
+  sse.onerror=()=>{logSt.textContent='已断开，重连中...';logDot.className='sdot off';setTimeout(connectLogs,3000);};
+}
+connectLogs();
+logFil.addEventListener('change',applyFil);
+$('log-clear').addEventListener('click',()=>{logArr=[];logCon.innerHTML='';});
+
+function jsonHL(obj){
+  return JSON.stringify(obj,null,2)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/("[^"]+")\s*:/g,'<span class="jk">$1</span>:')
+    .replace(/:\s*("[^"]*")/g,': <span class="js">$1</span>')
+    .replace(/:\s*(-?\d+\.?\d*)/g,': <span class="jn">$1</span>')
+    .replace(/:\s*(true|false)/g,': <span class="jb">$1</span>')
+    .replace(/:\s*(null)/g,': <span class="jnu">$1</span>');
+}
+function mkAirportSubItem(sub){
+  const wrap=document.createElement('div');
+  wrap.style.cssText='background:var(--s1);border:1px solid var(--border);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:8px;position:relative';
+  const row1=document.createElement('div');
+  row1.style.cssText='display:grid;grid-template-columns:1fr 80px;gap:8px';
+  const urlInp=document.createElement('input');urlInp.type='text';urlInp.placeholder='订阅 URL';
+  urlInp.value=sub.url||'';urlInp.dataset.field='url';
+  const delBtn=document.createElement('button');delBtn.textContent='删除';delBtn.className='btn-d';
+  delBtn.style.cssText='padding:5px 10px;font-size:12px;height:100%';
+  delBtn.onclick=()=>wrap.remove();
+  row1.appendChild(urlInp);row1.appendChild(delBtn);
+  const row2=document.createElement('div');
+  row2.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:8px';
+  const nameInp=document.createElement('input');nameInp.type='text';nameInp.placeholder='名称（可选）';
+  nameInp.value=sub.name||'';nameInp.dataset.field='name';
+  const intervalInp=document.createElement('input');intervalInp.type='number';intervalInp.placeholder='刷新间隔（秒，默认3600）';
+  intervalInp.value=sub.interval_seconds||'';intervalInp.dataset.field='interval_seconds';
+  row2.appendChild(nameInp);row2.appendChild(intervalInp);
+  const row3=document.createElement('div');
+  row3.style.cssText='display:grid;grid-template-columns:1fr 1fr;gap:8px';
+  const filterInp=document.createElement('input');filterInp.type='text';filterInp.placeholder='节点过滤（正则，可选）';
+  filterInp.value=sub.filter||'';filterInp.dataset.field='filter';
+  const exFilterInp=document.createElement('input');exFilterInp.type='text';exFilterInp.placeholder='排除节点（正则，可选）';
+  exFilterInp.value=sub.exclude_filter||'';exFilterInp.dataset.field='exclude_filter';
+  row3.appendChild(filterInp);row3.appendChild(exFilterInp);
+  const row4=document.createElement('div');
+  row4.style.cssText='display:grid;grid-template-columns:1fr 80px;gap:8px;align-items:center';
+  const exTypeInp=document.createElement('input');exTypeInp.type='text';exTypeInp.placeholder='排除协议类型（如 http,ss）';
+  exTypeInp.value=sub.exclude_type||'';exTypeInp.dataset.field='exclude_type';
+  const enableWrap=document.createElement('label');
+  enableWrap.style.cssText='display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);cursor:pointer;white-space:nowrap';
+  const enableChk=document.createElement('input');enableChk.type='checkbox';enableChk.checked=sub.enabled!==false;
+  enableChk.dataset.field='enabled';
+  enableWrap.appendChild(enableChk);enableWrap.appendChild(document.createTextNode('启用'));
+  row4.appendChild(exTypeInp);row4.appendChild(enableWrap);
+  wrap.appendChild(row1);wrap.appendChild(row2);wrap.appendChild(row3);wrap.appendChild(row4);
+  return wrap;
+}
+
+function readAirportSubs(){
+  return Array.from(document.querySelectorAll('#airport-sub-list > div')).map(wrap=>{
+    const get=f=>wrap.querySelector('[data-field="'+f+'"]');
+    return {
+      url:get('url').value.trim(),
+      name:get('name').value.trim(),
+      enabled:get('enabled').checked,
+      interval_seconds:parseInt(get('interval_seconds').value)||3600,
+      filter:get('filter').value.trim(),
+      exclude_filter:get('exclude_filter').value.trim(),
+      exclude_type:get('exclude_type').value.trim(),
+      headers:{},
+    };
+  }).filter(s=>s.url);
+}
+
+$('airport-sub-add').addEventListener('click',()=>{
+  $('airport-sub-list').appendChild(mkAirportSubItem({}));
+});
+
+function loadConfig(){
+
+  fetch('/admin/config').then(r=>r.json()).then(d=>{
+    const c=d.config||{};
+    $('cfg-port').value=c.port||'';
+    $('cfg-timeout').value=c.timeout||'';
+    $('cfg-cursor-model').value=c.cursor_model||'';
+    $('cfg-concurrency').value=c.concurrency||'';
+    $('cfg-queue-timeout').value=c.queue_timeout||'';
+    $('cfg-retry-delay').value=c.retry_delay||'';
+    $('cfg-max-retry-delay').value=c.max_retry_delay||'';
+    $('cfg-direct429').value=c.direct_429_cooldown_ms||'';
+    $('cfg-proxy-hc').value=c.proxy_health_check_interval_ms||'';
+    $('cfg-proxy-probe').value=c.proxy_probe_timeout_ms||'';
+    $('cfg-proxy-pause-base').value=c.proxy_pause_base_ms||'';
+    $('cfg-proxy-pause-max').value=c.proxy_pause_max_ms||'';
+    $('cfg-proxy').value=c.proxy||'';
+    $('cfg-enable-thinking').checked=!!c.enable_thinking;
+    $('cfg-system-prompt').value=c.system_prompt_inject||'';
+    $('cfg-proxy-pool').value=Array.isArray(c.proxy_pool)?c.proxy_pool.join('\n'):'';
+    $('cfg-sub-refresh').value=c.proxy_subscription_refresh_ms||'';
+    $('cfg-sub-timeout').value=c.proxy_subscription_timeout_ms||'';
+    $('cfg-sub-maxbytes').value=c.proxy_subscription_max_bytes||'';
+    $('cfg-sub-api-enabled').checked=!!c.proxy_subscription_api_enabled;
+    $('cfg-sub-api-token').value=c.proxy_subscription_api_token||'';
+    $('cfg-airport-bin').value=c.airport_runtime_binary_path||'';
+    $('cfg-airport-socks').value=c.airport_runtime_socks_port||'';
+    $('cfg-airport-ctrl').value=c.airport_runtime_control_port||'';
+    $('cfg-airport-workdir').value=c.airport_runtime_work_dir||'';
+    $('cfg-airport-testurl').value=c.airport_runtime_test_url||'';
+    $('cfg-airport-interval').value=c.airport_runtime_test_interval_seconds||'';
+    $('cfg-airport-loglevel').value=c.airport_runtime_log_level||'warning';
+    $('cfg-airport-mode').value=c.airport_runtime_mode||'auto';
+    $('cfg-airport-grouptype').value=c.airport_runtime_group_type||'url-test';
+    $('cfg-airport-groupstrategy').value=c.airport_runtime_group_strategy||'';
+    try{$('cfg-model-mapping').value=JSON.stringify(c.model_mapping||{},null,2);}catch(e){}
+    try{$('cfg-proxy-subscriptions').value=JSON.stringify(c.proxy_subscriptions||[],null,2);}catch(e){}
+    const subList=$('airport-sub-list');
+    subList.innerHTML='';
+    (c.airport_subscriptions||[]).forEach(s=>subList.appendChild(mkAirportSubItem(s)));
+    const fp=c.fingerprint||{};
+    $('cfg-ua').value=fp.user_agent||'';
+    const v=c.vision||{};
+    $('cfg-vision-enabled').checked=!!v.enabled;
+    $('cfg-vision-mode').value=v.mode||'ocr';
+    $('cfg-vision-baseurl').value=v.base_url||'';
+    $('cfg-vision-apikey').value=v.api_key||'';
+    $('cfg-vision-model').value=v.model||'';
+  }).catch(err=>showToast('加载配置失败: '+err.message,false));
+  fetch('/admin/config/running').then(r=>r.json()).then(d=>{
+    $('running-json').innerHTML=jsonHL(d.config);
+  }).catch(()=>{$('running-json').textContent='加载失败';});
+}
+$('cfg-save').addEventListener('click',()=>{
+  const pool=$('cfg-proxy-pool').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  let modelMap=undefined;
+  try{const v=$('cfg-model-mapping').value.trim();if(v)modelMap=JSON.parse(v);}catch(e){showToast('模型映射 JSON 格式错误',false);return;}
+  const ni=v=>parseInt(v)||undefined;
+  const body={
+    port:ni($('cfg-port').value),
+    timeout:ni($('cfg-timeout').value),
+    cursor_model:$('cfg-cursor-model').value||undefined,
+    concurrency:ni($('cfg-concurrency').value),
+    queue_timeout:ni($('cfg-queue-timeout').value),
+    retry_delay:ni($('cfg-retry-delay').value),
+    max_retry_delay:ni($('cfg-max-retry-delay').value),
+    direct_429_cooldown_ms:ni($('cfg-direct429').value),
+    proxy_health_check_interval_ms:ni($('cfg-proxy-hc').value),
+    proxy_probe_timeout_ms:ni($('cfg-proxy-probe').value),
+    proxy_pause_base_ms:ni($('cfg-proxy-pause-base').value),
+    proxy_pause_max_ms:ni($('cfg-proxy-pause-max').value),
+    proxy:$('cfg-proxy').value||undefined,
+    enable_thinking:$('cfg-enable-thinking').checked,
+    system_prompt_inject:$('cfg-system-prompt').value,
+    proxy_pool:pool,
+    proxy_subscription_refresh_ms:ni($('cfg-sub-refresh').value),
+    proxy_subscription_timeout_ms:ni($('cfg-sub-timeout').value),
+    proxy_subscription_max_bytes:ni($('cfg-sub-maxbytes').value),
+    proxy_subscription_api_enabled:$('cfg-sub-api-enabled').checked,
+    proxy_subscription_api_token:$('cfg-sub-api-token').value||undefined,
+    airport_runtime_binary_path:$('cfg-airport-bin').value||undefined,
+    airport_runtime_socks_port:ni($('cfg-airport-socks').value),
+    airport_runtime_control_port:ni($('cfg-airport-ctrl').value),
+    airport_runtime_work_dir:$('cfg-airport-workdir').value||undefined,
+    airport_runtime_test_url:$('cfg-airport-testurl').value||undefined,
+    airport_runtime_test_interval_seconds:ni($('cfg-airport-interval').value),
+    airport_runtime_log_level:$('cfg-airport-loglevel').value||undefined,
+    airport_runtime_mode:$('cfg-airport-mode').value||undefined,
+    airport_runtime_group_type:$('cfg-airport-grouptype').value||undefined,
+    airport_runtime_group_strategy:$('cfg-airport-groupstrategy').value,
+    model_mapping:modelMap,
+    proxy_subscriptions:(()=>{try{const v=$('cfg-proxy-subscriptions').value.trim();return v?JSON.parse(v):undefined;}catch(e){showToast('代理订阅 JSON 格式错误',false);throw e;}})(),
+    airport_subscriptions:readAirportSubs(),
+    fingerprint:$('cfg-ua').value?{user_agent:$('cfg-ua').value}:undefined,
+    vision:{
+      enabled:$('cfg-vision-enabled').checked,
+      mode:$('cfg-vision-mode').value,
+      base_url:$('cfg-vision-baseurl').value||undefined,
+      api_key:$('cfg-vision-apikey').value||undefined,
+      model:$('cfg-vision-model').value||undefined,
+    }
+  };
+  Object.keys(body).forEach(k=>body[k]===undefined&&delete body[k]);
+  fetch('/admin/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(r=>r.json()).then(d=>{
+      if(d.ok)showToast(d.message||'配置已保存',true);
+      else showToast('保存失败: '+(d.error||'未知错误'),false);
+    }).catch(err=>showToast('请求失败: '+err.message,false));
+});
+$('cfg-reload').addEventListener('click',loadConfig);
+})();
+</script>
+</body>
+</html>

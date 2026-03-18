@@ -25,12 +25,33 @@ const SMART_SINGLE_QUOTES = new Set([
 export function normalizeToolArguments(args: Record<string, unknown>): Record<string, unknown> {
     if (!args || typeof args !== 'object') return args;
 
-    if ('file_path' in args && !('path' in args)) {
-        args.path = args.file_path;
-        delete args.file_path;
+    const normalized = { ...args };
+
+    const fileValue = normalized.filePath ?? normalized.path ?? normalized.file_path ?? normalized.file;
+    if (typeof fileValue === 'string' && fileValue) {
+        if (!('filePath' in normalized)) normalized.filePath = fileValue;
+        if (!('path' in normalized)) normalized.path = fileValue;
     }
 
-    return args;
+    const oldStringValue = normalized.oldString ?? normalized.old_string ?? normalized.old_str;
+    if (typeof oldStringValue === 'string' && oldStringValue) {
+        if (!('oldString' in normalized)) normalized.oldString = oldStringValue;
+        if (!('old_string' in normalized)) normalized.old_string = oldStringValue;
+    }
+
+    const newStringValue = normalized.newString ?? normalized.new_string ?? normalized.new_str ?? normalized.file_text;
+    if (typeof newStringValue === 'string' && newStringValue) {
+        if (!('newString' in normalized)) normalized.newString = newStringValue;
+        if (!('new_string' in normalized)) normalized.new_string = newStringValue;
+    }
+
+    const insertLineValue = normalized.insertLine ?? normalized.insert_line;
+    if (typeof insertLineValue === 'number') {
+        if (!('insertLine' in normalized)) normalized.insertLine = insertLineValue;
+        if (!('insert_line' in normalized)) normalized.insert_line = insertLineValue;
+    }
+
+    return normalized;
 }
 
 /**
@@ -122,6 +143,24 @@ export function repairExactMatchToolArguments(
     return args;
 }
 
+export function repairBashCommandArguments(
+    toolName: string,
+    args: Record<string, unknown>,
+): Record<string, unknown> {
+    const lowerName = (toolName || '').toLowerCase();
+    if (!/^(bash|execute_command|runcommand)$/.test(lowerName)) {
+        return args;
+    }
+
+    const command = args.command;
+    if (typeof command !== 'string' || !/<<[-~]?\s*['"]?\w+['"]?/.test(command)) {
+        return args;
+    }
+
+    args.command = command.replace(/(?:\n\s*(?:[\]}],?|"|')\s*)+(?:\n```)?\s*$/, '');
+    return args;
+}
+
 /**
  * 对解析出的工具调用应用全部修复
  */
@@ -131,5 +170,6 @@ export function fixToolCallArguments(
 ): Record<string, unknown> {
     args = normalizeToolArguments(args);
     args = repairExactMatchToolArguments(toolName, args);
+    args = repairBashCommandArguments(toolName, args);
     return args;
 }

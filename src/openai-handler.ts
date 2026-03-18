@@ -42,6 +42,7 @@ import {
     FIRST_TURN_NEUTRAL_RESPONSE,
     MAX_REFUSAL_RETRIES,
     getOpenAIToolFinishReason,
+    getToolModeNoCallFallbackText,
     resolveToolResponse,
     isTruncated,
 } from './handler.js';
@@ -564,7 +565,7 @@ async function handleOpenAIStream(
     try {
         await executeStream();
 
-        console.log(`[OpenAI] 原始响应 (${fullResponse.length} chars, tools=${hasTools}): ${fullResponse.substring(0, 200)}${fullResponse.length > 200 ? '...' : ''}`);
+        console.log(`[OpenAI] 原始响应 (${fullResponse.length} chars, tools=${hasTools}): ${fullResponse}`);
 
         // 拒绝检测 + 自动重试（工具模式和非工具模式均生效）
         const shouldRetryResponse = () => {
@@ -705,13 +706,8 @@ async function handleOpenAIStream(
                 }
             } else {
                 finishReason = getOpenAIToolFinishReason(resolved);
-                // 误报：发送清洗后的文本
-                let textToSend = resolved.stillTruncated ? resolved.cleanText : fullResponse;
-                if (isRefusal(fullResponse)) {
-                    textToSend = 'I understand the request. Let me proceed with the appropriate action. Could you clarify what specific task you would like me to perform?';
-                } else {
-                    textToSend = normalizeOpenAIOutputText(resolved.stillTruncated ? resolved.cleanText : fullResponse, body.response_format, anthropicReq);
-                }
+                let textToSend = getToolModeNoCallFallbackText(fullResponse, resolved.stillTruncated ? resolved.cleanText : fullResponse, resolved.stillTruncated, anthropicReq);
+                textToSend = normalizeOpenAIOutputText(textToSend, body.response_format, anthropicReq);
                 completionContent = textToSend;
                 writeOpenAISSE(res, {
                     id, object: 'chat.completion.chunk', created, model,
@@ -884,12 +880,11 @@ async function handleOpenAINonStream(
             }));
         } else {
             finishReason = getOpenAIToolFinishReason(resolved);
-            // 无工具调用，检查拒绝
-            if (isRefusal(fullText)) {
-                content = 'I understand the request. Let me proceed with the appropriate action. Could you clarify what specific task you would like me to perform?';
-            } else {
-                content = normalizeOpenAIOutputText(resolved.stillTruncated ? resolved.cleanText : fullText, body.response_format, anthropicReq);
-            }
+            content = normalizeOpenAIOutputText(
+                getToolModeNoCallFallbackText(fullText, resolved.stillTruncated ? resolved.cleanText : fullText, resolved.stillTruncated, anthropicReq),
+                body.response_format,
+                anthropicReq,
+            );
         }
     } else {
         if (thinkingEnabled && fullText.includes('<thinking>')) {

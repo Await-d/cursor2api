@@ -9,6 +9,25 @@ export interface ExtractThinkingResult {
     cleanText: string;
 }
 
+function findUnclosedThinkingBoundary(tail: string): number | null {
+    const actionFenceIdx = tail.search(/\n\s*```json\s+action\b/i);
+    if (actionFenceIdx > 0 && tail.slice(0, actionFenceIdx).trim()) {
+        return actionFenceIdx;
+    }
+
+    const paragraphIdx = tail.indexOf('\n\n');
+    if (paragraphIdx > 0) {
+        const prefix = tail.slice(0, paragraphIdx).trim();
+        const lineCount = prefix ? prefix.split('\n').length : 0;
+        const wordCount = prefix ? prefix.split(/\s+/).length : 0;
+        if (prefix && lineCount <= 6 && wordCount <= 140) {
+            return paragraphIdx;
+        }
+    }
+
+    return null;
+}
+
 export function extractThinking(text: string): ExtractThinkingResult {
     const thinkingBlocks: ThinkingBlock[] = [];
 
@@ -33,11 +52,19 @@ export function extractThinking(text: string): ExtractThinkingResult {
     const lastOpenIdx = text.lastIndexOf('<thinking>');
     const lastCloseIdx = text.lastIndexOf('</thinking>');
     if (lastOpenIdx >= 0 && (lastCloseIdx < 0 || lastOpenIdx > lastCloseIdx)) {
-        const unclosedContent = text.substring(lastOpenIdx + '<thinking>'.length).trim();
+        const tail = text.substring(lastOpenIdx + '<thinking>'.length);
+        const boundary = findUnclosedThinkingBoundary(tail);
+        const thinkingSlice = boundary === null ? tail : tail.slice(0, boundary);
+        const unclosedContent = thinkingSlice.trim();
         if (unclosedContent) {
             thinkingBlocks.push({ thinking: unclosedContent });
         }
-        ranges.push({ start: lastOpenIdx, end: text.length });
+        ranges.push({
+            start: lastOpenIdx,
+            end: boundary === null
+                ? text.length
+                : lastOpenIdx + '<thinking>'.length + boundary,
+        });
     }
 
     ranges.sort((a, b) => b.start - a.start);
@@ -72,4 +99,4 @@ export function extractThinkingIfEnabled(text: string, enabled: boolean): Extrac
     return extractThinking(text);
 }
 
-export const THINKING_HINT = `You may use <thinking>...</thinking> for brief private reasoning. HARD LIMITS: max 3 lines, max 120 words. Do NOT write code, full solutions, or long analysis inside thinking. Never repeat thinking content in the final response.`;
+export const THINKING_HINT = `When useful, emit exactly one brief private reasoning block wrapped in <thinking>...</thinking> before your visible answer or tool action. Always close the </thinking> tag before continuing. HARD LIMITS: max 3 lines, max 120 words. Do NOT write code, full solutions, or long analysis inside thinking. Never repeat thinking content in the final response.`;

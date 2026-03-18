@@ -37,6 +37,8 @@ RUN npm ci --omit=dev \
 # 从 builder 阶段拷贝编译后的产物
 COPY --from=builder --chown=cursor:nodejs /app/dist ./dist
 
+COPY --from=builder --chown=cursor:nodejs /app/src/public ./src/public
+
 # 拷贝 Mihomo 二进制，供机场订阅桥接使用
 COPY --from=mihomo /mihomo /usr/local/bin/mihomo
 

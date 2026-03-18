@@ -17,11 +17,23 @@ const SMART_SINGLE_QUOTES = new Set([
 
 function normalizeToolArguments(args) {
     if (!args || typeof args !== 'object') return args;
-    if ('file_path' in args && !('path' in args)) {
-        args.path = args.file_path;
-        delete args.file_path;
+    const normalized = { ...args };
+    const fileValue = normalized.filePath ?? normalized.path ?? normalized.file_path ?? normalized.file;
+    if (typeof fileValue === 'string' && fileValue) {
+        if (!('filePath' in normalized)) normalized.filePath = fileValue;
+        if (!('path' in normalized)) normalized.path = fileValue;
     }
-    return args;
+    const oldStringValue = normalized.oldString ?? normalized.old_string ?? normalized.old_str;
+    if (typeof oldStringValue === 'string' && oldStringValue) {
+        if (!('oldString' in normalized)) normalized.oldString = oldStringValue;
+        if (!('old_string' in normalized)) normalized.old_string = oldStringValue;
+    }
+    const newStringValue = normalized.newString ?? normalized.new_string ?? normalized.new_str ?? normalized.file_text;
+    if (typeof newStringValue === 'string' && newStringValue) {
+        if (!('newString' in normalized)) normalized.newString = newStringValue;
+        if (!('new_string' in normalized)) normalized.new_string = newStringValue;
+    }
+    return normalized;
 }
 
 function replaceSmartQuotes(text) {
@@ -33,9 +45,13 @@ function replaceSmartQuotes(text) {
     }).join('');
 }
 
-function fixToolCallArguments(toolName, args) {
+function fixToolCallArguments(_toolName, args) {
     args = normalizeToolArguments(args);
     // repairExactMatchToolArguments is skipped in unit test (needs file system)
+    const lowerName = (_toolName || '').toLowerCase();
+    if (/^(bash|execute_command|runcommand)$/.test(lowerName) && typeof args?.command === 'string' && /<<[-~]?\s*['"]?\w+['"]?/.test(args.command)) {
+        args.command = args.command.replace(/(?:\n\s*(?:[\]}],?|"|')\s*)+(?:\n```)?\s*$/, '');
+    }
     return args;
 }
 
@@ -69,11 +85,12 @@ function assertEqual(a, b, msg) {
 // ════════════════════════════════════════════════════════════════════
 console.log('\n📦 [1] normalizeToolArguments — 字段名映射\n');
 
-test('file_path → path 映射', () => {
+test('file_path → filePath/path alias 映射', () => {
     const args = { file_path: 'src/index.ts', content: 'hello' };
     const result = normalizeToolArguments(args);
+    assertEqual(result.filePath, 'src/index.ts');
     assertEqual(result.path, 'src/index.ts');
-    assert(!('file_path' in result), 'file_path 应被删除');
+    assertEqual(result.file_path, 'src/index.ts');
     assertEqual(result.content, 'hello', 'content 不应被修改');
 });
 
@@ -81,7 +98,15 @@ test('已有 path 字段时不覆盖', () => {
     const args = { file_path: 'old.ts', path: 'new.ts' };
     const result = normalizeToolArguments(args);
     assertEqual(result.path, 'new.ts', '应保留原始 path');
+    assertEqual(result.filePath, 'new.ts', '应补齐 filePath 别名');
     assert('file_path' in result, 'file_path 应保留');
+});
+
+test('old_string/new_string 生成 camelCase 别名', () => {
+    const args = { old_string: 'before', new_string: 'after' };
+    const result = normalizeToolArguments(args);
+    assertEqual(result.oldString, 'before');
+    assertEqual(result.newString, 'after');
 });
 
 test('无 file_path 时不影响', () => {
@@ -145,16 +170,18 @@ test('代码中的智能引号修复', () => {
 // ════════════════════════════════════════════════════════════════════
 console.log('\n📦 [3] fixToolCallArguments — 综合修复\n');
 
-test('Read 工具: file_path → path', () => {
+test('Read 工具: file_path → filePath/path', () => {
     const args = { file_path: 'src/main.ts' };
     const result = fixToolCallArguments('Read', args);
+    assertEqual(result.filePath, 'src/main.ts');
     assertEqual(result.path, 'src/main.ts');
-    assert(!('file_path' in result));
+    assertEqual(result.file_path, 'src/main.ts');
 });
 
 test('Write 工具: file_path + content 完整修复', () => {
     const args = { file_path: 'test.ts', content: 'console.log("hello")' };
     const result = fixToolCallArguments('Write', args);
+    assertEqual(result.filePath, 'test.ts');
     assertEqual(result.path, 'test.ts');
     assertEqual(result.content, 'console.log("hello")');
 });
@@ -163,6 +190,18 @@ test('Bash 工具: 无映射需要', () => {
     const args = { command: 'ls -la' };
     const result = fixToolCallArguments('Bash', args);
     assertEqual(result.command, 'ls -la');
+});
+
+test('Bash 工具: heredoc 命令去除外层 JSON 尾巴', () => {
+    const args = { command: "cat > /tmp/demo.ts <<'EOF'\nconst value = 1\nEOF\n}\n}" };
+    const result = fixToolCallArguments('Bash', args);
+    assertEqual(result.command, "cat > /tmp/demo.ts <<'EOF'\nconst value = 1\nEOF");
+});
+
+test('Bash 工具: heredoc 命令去除尾部单独引号垃圾行', () => {
+    const args = { command: "cat > /tmp/demo.ts <<'EOF'\nconst value = 1\nEOF\n\"\n}" };
+    const result = fixToolCallArguments('Bash', args);
+    assertEqual(result.command, "cat > /tmp/demo.ts <<'EOF'\nconst value = 1\nEOF");
 });
 
 test('非对象参数安全处理', () => {
@@ -177,7 +216,9 @@ console.log('\n📦 [4] parseToolCalls + fixToolCallArguments 集成\n');
 
 function tolerantParse(jsonStr) {
     try { return JSON.parse(jsonStr); } catch { /* pass */ }
-    let inString = false, escaped = false, fixed = '';
+    let inString = false;
+    let escaped = false;
+    let fixed = '';
     const bracketStack = [];
     for (let i = 0; i < jsonStr.length; i++) {
         const char = jsonStr[i];
@@ -199,8 +240,8 @@ function parseToolCallsWithFix(responseText) {
     const toolCalls = [];
     let cleanText = responseText;
     const fullBlockRegex = /```json(?:\s+action)?\s*([\s\S]*?)\s*```/g;
-    let match;
-    while ((match = fullBlockRegex.exec(responseText)) !== null) {
+    let match = fullBlockRegex.exec(responseText);
+    while (match !== null) {
         let isToolCall = false;
         try {
             const parsed = tolerantParse(match[1]);
@@ -213,11 +254,12 @@ function parseToolCallsWithFix(responseText) {
             }
         } catch (e) { /* skip */ }
         if (isToolCall) cleanText = cleanText.replace(match[0], '');
+        match = fullBlockRegex.exec(responseText);
     }
     return { toolCalls, cleanText: cleanText.trim() };
 }
 
-test('解析含 file_path 的工具调用 → 自动修复为 path', () => {
+test('解析含 file_path 的工具调用 → 自动修复为 filePath/path', () => {
     const text = `I'll read the file now.
 
 \`\`\`json action
@@ -231,8 +273,9 @@ test('解析含 file_path 的工具调用 → 自动修复为 path', () => {
     const { toolCalls } = parseToolCallsWithFix(text);
     assertEqual(toolCalls.length, 1);
     assertEqual(toolCalls[0].name, 'Read');
+    assertEqual(toolCalls[0].arguments.filePath, 'src/index.ts');
     assertEqual(toolCalls[0].arguments.path, 'src/index.ts');
-    assert(!('file_path' in toolCalls[0].arguments), 'file_path 应被删除');
+    assertEqual(toolCalls[0].arguments.file_path, 'src/index.ts');
 });
 
 test('多个工具调用全部修复', () => {
@@ -245,7 +288,9 @@ test('多个工具调用全部修复', () => {
 \`\`\``;
     const { toolCalls } = parseToolCallsWithFix(text);
     assertEqual(toolCalls.length, 2);
+    assertEqual(toolCalls[0].arguments.filePath, 'a.ts');
     assertEqual(toolCalls[0].arguments.path, 'a.ts');
+    assertEqual(toolCalls[1].arguments.filePath, 'b.ts');
     assertEqual(toolCalls[1].arguments.path, 'b.ts');
     assertEqual(toolCalls[1].arguments.content, 'hello');
 });

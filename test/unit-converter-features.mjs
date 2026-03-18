@@ -109,6 +109,121 @@ await test('communication tool description skipping is case-insensitive', async 
     assert(!prompt.includes('- **AttemptCompletion**: Signal task completion to the user.'), 'case-insensitive communication tool description should be skipped');
 });
 
+await test('convertToCursorRequest uses action-only few-shot with filePath for Read tools', async () => {
+    const cursorReq = await convertToCursorRequest({
+        model: 'claude-sonnet-4',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'Inspect src/index.ts' }],
+        tools: [{
+            name: 'Read',
+            description: 'Read file contents from disk',
+            input_schema: { type: 'object', properties: { filePath: { type: 'string' } } },
+        }],
+    });
+
+    const fewShot = cursorReq.messages[1]?.parts[0]?.text || '';
+    assert(fewShot.startsWith('```json action'), 'few-shot assistant example should start with the action block itself');
+    assert(fewShot.includes('"filePath": "src/index.ts"'), 'Read few-shot should use filePath instead of file_path');
+    assert(!fewShot.includes('Understood. I\'ll use the structured format'), 'few-shot should avoid explanatory preamble');
+});
+
+await test('buildToolInstructions tells write-style tools to stop explaining once edit is known', async () => {
+    const cursorReq = await convertToCursorRequest({
+        model: 'claude-sonnet-4',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'Fix App.css' }],
+        tools: [{
+            name: 'Write',
+            description: 'Write file contents to disk',
+            input_schema: { type: 'object', properties: { filePath: { type: 'string' }, content: { type: 'string' } } },
+        }],
+    });
+
+    const prompt = cursorReq.messages[0]?.parts[0]?.text || '';
+    assert(prompt.includes('Once you already know what file content or edit needs to happen, stop explaining the diagnosis and emit the next concrete write/edit action immediately.'), 'write-style prompt should discourage explanation-only output');
+});
+
+await test('buildToolInstructions tells tool mode to stop summarizing diagnosis once next step is known', async () => {
+    const cursorReq = await convertToCursorRequest({
+        model: 'claude-sonnet-4',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'Investigate the backend timeout' }],
+        tools: [{
+            name: 'Read',
+            description: 'Read file contents from disk',
+            input_schema: { type: 'object', properties: { filePath: { type: 'string' } } },
+        }],
+    });
+
+    const prompt = cursorReq.messages[0]?.parts[0]?.text || '';
+    assert(prompt.includes('Once you already understand the diagnosis or next step, stop summarizing it and emit the next concrete action directly.'), 'general tool prompt should discourage diagnosis-only prose');
+});
+
+await test('buildToolInstructions tells tool mode to call background_output instead of saying it is waiting', async () => {
+    const cursorReq = await convertToCursorRequest({
+        model: 'claude-sonnet-4',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'Wait for the Oracle result' }],
+        tools: [{
+            name: 'background_output',
+            description: 'Read background task output',
+            input_schema: { type: 'object', properties: { task_id: { type: 'string' } } },
+        }],
+    });
+
+    const prompt = cursorReq.messages[0]?.parts[0]?.text || '';
+    assert(prompt.includes('If you are waiting for a background task result, do not say you are waiting. Call the background_output action instead.'), 'tool prompt should discourage waiting placeholder prose');
+});
+
+await test('buildToolInstructions forbids low-value bash completion commands', async () => {
+    const cursorReq = await convertToCursorRequest({
+        model: 'claude-sonnet-4',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'Finish the task if complete' }],
+        tools: [{
+            name: 'Bash',
+            description: 'Run shell commands',
+            input_schema: { type: 'object', properties: { command: { type: 'string' } } },
+        }, {
+            name: 'attempt_completion',
+            description: 'Finish the task',
+            input_schema: { type: 'object', properties: {} },
+        }],
+    });
+
+    const prompt = cursorReq.messages[0]?.parts[0]?.text || '';
+    assert(prompt.includes('Do not output empty, ceremonial, or placeholder commands such as \"echo \'Done\'\", \"echo \'Analysis complete\'\", or other bash no-op completion markers.'), 'tool prompt should explicitly discourage no-op bash completion commands');
+});
+
+await test('buildToolInstructions summarizes schemas instead of dumping raw properties JSON', async () => {
+    const cursorReq = await convertToCursorRequest({
+        model: 'claude-sonnet-4',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'Inspect files' }],
+        tools: [{
+            name: 'CustomTool',
+            description: 'Do custom work',
+            input_schema: {
+                type: 'object',
+                properties: {
+                    filePath: { type: 'string' },
+                    oldString: { type: 'string' },
+                    newString: { type: 'string' },
+                    insertLine: { type: 'number' },
+                    mode: { type: 'string' },
+                    encoding: { type: 'string' },
+                    description: { type: 'string' },
+                },
+                required: ['filePath', 'oldString', 'newString', 'insertLine', 'mode'],
+            },
+        }],
+    });
+
+    const prompt = cursorReq.messages[0]?.parts[0]?.text || '';
+    assert(prompt.includes('Schema: { fields: filePath, oldString, newString, insertLine, mode, encoding, +1 more; required: filePath, oldString, newString, insertLine, mode }'), 'tool prompt should summarize schema fields compactly while retaining all required names');
+    assert(!prompt.includes('"properties"'), 'tool prompt should avoid dumping raw schema JSON');
+});
+
 await test('convertToCursorRequest strips control-mode blocks in tool user text', async () => {
     const injected = `[search-mode]
 MAXIMIZE SEARCH EFFORT. Launch multiple background agents.
@@ -233,6 +348,70 @@ await test('convertToCursorRequest keeps control markers inside code fences', as
 
     assert(allText.includes('[search-mode]'), 'should preserve control markers inside code fences');
     assert(allText.includes('MAXIMIZE SEARCH EFFORT'), 'should preserve fenced content');
+});
+
+await test('convertToCursorRequest rewrites assistant history with tool calls to action-only format', async () => {
+    const cursorReq = await convertToCursorRequest({
+        model: 'claude-sonnet-4',
+        max_tokens: 1024,
+        tools: [{
+            name: 'Read',
+            description: 'Read file contents from disk',
+            input_schema: { type: 'object', properties: { filePath: { type: 'string' } } },
+        }],
+        messages: [
+            { role: 'user', content: 'Inspect src/index.ts' },
+            {
+                role: 'assistant',
+                content: 'Let me inspect the file first.\n\n```json action\n{"tool":"Read","parameters":{"filePath":"src/index.ts"}}\n```',
+            },
+        ],
+    });
+
+    const assistantHistory = cursorReq.messages[3]?.parts[0]?.text || '';
+    assert(assistantHistory.startsWith('```json action'), 'assistant history with tool calls should be action-only');
+    assert(!assistantHistory.includes('Let me inspect the file first'), 'assistant history should drop explanatory preamble when preserving tool calls');
+});
+
+await test('convertToCursorRequest canonicalizes duplicate alias fields in assistant edit history', async () => {
+    const cursorReq = await convertToCursorRequest({
+        model: 'claude-sonnet-4',
+        max_tokens: 1024,
+        tools: [{
+            name: 'edit',
+            description: 'Edit a file',
+            input_schema: { type: 'object', properties: { filePath: { type: 'string' }, oldString: { type: 'string' }, newString: { type: 'string' } } },
+        }],
+        messages: [
+            { role: 'user', content: 'Fix FileList.tsx' },
+            {
+                role: 'assistant',
+                content: [
+                    '```json action',
+                    '{',
+                    '  "tool": "edit",',
+                    '  "parameters": {',
+                    '    "filePath": "/tmp/FileList.tsx",',
+                    '    "oldString": "  if (loading) {",',
+                    '    "path": "/tmp/FileList.tsx",',
+                    '    "old_string": "\n\"\n\n  if (loading) {",',
+                    '    "newString": "  if (loading) {",',
+                    '    "new_string": "\n\n  if (loading) {"',
+                    '  }',
+                    '}',
+                    '```',
+                ].join('\n'),
+            },
+        ],
+    });
+
+    const assistantHistory = cursorReq.messages[3]?.parts[0]?.text || '';
+    assert(assistantHistory.includes('"filePath": "/tmp/FileList.tsx"'), 'assistant history should keep a single canonical filePath');
+    assert(assistantHistory.includes('"oldString": "  if (loading) {"'), 'assistant history should keep the cleaner oldString value');
+    assert(assistantHistory.includes('"newString": "  if (loading) {"'), 'assistant history should keep the cleaner newString value');
+    assert(!assistantHistory.includes('"path":'), 'assistant history should not re-emit duplicate path alias');
+    assert(!assistantHistory.includes('"old_string":'), 'assistant history should not re-emit duplicate old_string alias');
+    assert(!assistantHistory.includes('"new_string":'), 'assistant history should not re-emit duplicate new_string alias');
 });
 
 await test('isRefusal recognizes the newly added Cursor refusal phrases', async () => {

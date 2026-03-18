@@ -380,8 +380,8 @@ await test('retry conversion keeps long history intact while changing prompt pro
 
     const toolResultMessages = retryCursorReq.messages
         .map(m => m.parts?.[0]?.text ?? '')
-        .filter(t => t.includes('Based on the output above'));
-    assert(toolResultMessages.length >= 5, 'retry conversion should keep multiple tool-result history messages verbatim');
+        .filter(t => t.includes('Continue with the next appropriate json action block.'));
+    assert(toolResultMessages.length >= 5, 'retry conversion should preserve multiple tool-result history messages');
 });
 
 console.log(`\n结果: ${passed} 通过 / ${failed} 失败 / ${passed + failed} 总计\n`);

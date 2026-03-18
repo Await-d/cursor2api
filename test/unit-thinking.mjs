@@ -1,4 +1,4 @@
-import { extractThinking } from '../src/thinking.ts';
+import { extractThinking, THINKING_HINT } from '../src/thinking.ts';
 import { convertToAnthropicRequest, formatOpenAIMockText, responsesToChatCompletions, stripMarkdownJsonWrapper } from '../src/openai-handler.ts';
 
 let passed = 0;
@@ -36,6 +36,26 @@ test('extractThinking strips closed and unclosed thinking blocks', () => {
 
     assertEqual(extracted.thinkingBlocks.map(block => block.thinking), ['plan step 1', 'unfinished']);
     assertEqual(extracted.cleanText, 'BeforeMiddle');
+});
+
+test('extractThinking preserves visible answer after unclosed thinking block', () => {
+    const input = 'Before<thinking>plan step 1\nplan step 2\n\nVisible answer continues here';
+    const extracted = extractThinking(input);
+
+    assertEqual(extracted.thinkingBlocks.map(block => block.thinking), ['plan step 1\nplan step 2']);
+    assert(extracted.cleanText.includes('Visible answer continues here'), 'visible answer should remain after unclosed thinking extraction');
+});
+
+test('extractThinking preserves trailing action block after unclosed thinking block', () => {
+    const input = 'Intro<thinking>plan the next read\n```json action\n{"tool":"Read","parameters":{"filePath":"src/index.ts"}}\n```';
+    const extracted = extractThinking(input);
+
+    assertEqual(extracted.thinkingBlocks.map(block => block.thinking), ['plan the next read']);
+    assert(extracted.cleanText.includes('```json action'), 'tool action should remain available after unclosed thinking extraction');
+});
+
+test('THINKING_HINT explicitly requires closed tags', () => {
+    assert(THINKING_HINT.includes('Always close the </thinking> tag'), 'thinking hint should explicitly require closing tag');
 });
 
 test('responsesToChatCompletions keeps reasoning content from responses blocks', () => {
