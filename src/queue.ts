@@ -51,6 +51,10 @@ export class RequestQueue {
         return this.running;
     }
 
+    get concurrencyLimit(): number {
+        return this.options.concurrency;
+    }
+
     get pendingCount(): number {
         return this.queue.length;
     }
@@ -183,4 +187,8 @@ export function getQueue(): RequestQueue {
         _instance = new RequestQueue();
     }
     return _instance;
+}
+
+export function formatQueueRuntimeStatus(queue: Pick<RequestQueue, 'activeCount' | 'pendingCount' | 'concurrencyLimit'>): string {
+    return `运行中=${queue.activeCount}/${queue.concurrencyLimit}, 队列等待=${queue.pendingCount}`;
 }

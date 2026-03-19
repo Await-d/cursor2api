@@ -1,4 +1,4 @@
-import { writeFileSync, existsSync } from 'fs';
+import { writeFile } from 'fs/promises';
 import { stringify as stringifyYaml } from 'yaml';
 import type { Request, Response } from 'express';
 import { getConfig } from './config.js';
@@ -12,6 +12,7 @@ function runtimeToShape(cfg: ReturnType<typeof getConfig>): Record<string, unkno
         proxy: cfg.proxy ?? '',
         cursor_model: cfg.cursorModel,
         concurrency: cfg.concurrency,
+        queue_status_log_interval_ms: cfg.queueStatusLogIntervalMs,
         queue_timeout: cfg.queueTimeout,
         retry_delay: cfg.retryDelay,
         max_retry_delay: cfg.maxRetryDelay,
@@ -64,7 +65,7 @@ export function handleGetConfig(_req: Request, res: Response): void {
 }
 
 const ALLOWED_SCALAR_KEYS = new Set([
-    'port', 'timeout', 'cursor_model', 'concurrency', 'queue_timeout',
+    'port', 'timeout', 'cursor_model', 'concurrency', 'queue_status_log_interval_ms', 'queue_timeout',
     'retry_delay', 'max_retry_delay', 'enable_thinking', 'system_prompt_inject',
     'proxy', 'direct_429_cooldown_ms', 'proxy_health_check_interval_ms',
     'proxy_probe_timeout_ms', 'proxy_pause_base_ms', 'proxy_pause_max_ms',
@@ -81,7 +82,7 @@ const ALLOWED_SCALAR_KEYS = new Set([
 const ALLOWED_OBJECT_KEYS = new Set(['vision', 'fingerprint', 'model_mapping']);
 const ALLOWED_ARRAY_KEYS = new Set(['proxy_pool', 'proxy_subscriptions', 'airport_subscriptions']);
 
-export function handlePostConfig(req: Request, res: Response): void {
+export async function handlePostConfig(req: Request, res: Response): Promise<void> {
     const updates = req.body as Record<string, unknown>;
     if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
         res.status(400).json({ ok: false, error: 'Body must be a JSON object' });
@@ -113,10 +114,7 @@ export function handlePostConfig(req: Request, res: Response): void {
     void yamlKeys;
 
     try {
-        if (!existsSync(CONFIG_PATH)) {
-            writeFileSync(CONFIG_PATH, '', 'utf-8');
-        }
-        writeFileSync(CONFIG_PATH, stringifyYaml(current), 'utf-8');
+        await writeFile(CONFIG_PATH, stringifyYaml(current), 'utf-8');
         res.json({ ok: true, message: 'config.yaml 已更新，重启后生效。' });
     } catch (err) {
         res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });

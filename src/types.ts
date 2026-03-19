@@ -144,6 +144,7 @@ export interface AppConfig {
     proxy?: string;
     cursorModel: string;
     concurrency: number;
+    queueStatusLogIntervalMs: number;
     queueTimeout: number;
     retryDelay: number;
     maxRetryDelay: number;

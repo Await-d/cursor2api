@@ -490,6 +490,31 @@ export function sanitizeResponseFragmentForRequest(text: string, body: Anthropic
     return sanitizeResponseForRequestInternal(text, body, '');
 }
 
+const TOOL_RESIDUAL_FIELD_LINE = /^\s*"(?:tool|name|parameters|arguments|input|filePath|file_path|path|oldString|old_string|newString|new_string|content|replaceAll|insertLine|insert_line|file_text|command|description|timeout|workdir)"\s*:/im;
+const PASTED_MARKER_MATCH = /\[Pasted ~\d+ lines\]/i;
+const PASTED_MARKER_REPLACE = /\[Pasted ~\d+ lines\]/gi;
+
+export function hasSuspiciousToolResidualText(text: string): boolean {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    return PASTED_MARKER_MATCH.test(trimmed) || TOOL_RESIDUAL_FIELD_LINE.test(trimmed);
+}
+
+export function sanitizeToolVisibleText(text: string, body: AnthropicRequest): string {
+    const hadResidualSignature = hasSuspiciousToolResidualText(text);
+    const sanitized = sanitizeResponseFragmentForRequest(text, body)
+        .replace(PASTED_MARKER_REPLACE, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+
+    if (!sanitized) return '';
+    if (hadResidualSignature || hasSuspiciousToolResidualText(sanitized)) {
+        return '';
+    }
+
+    return sanitized;
+}
+
 // ==================== Messages API ====================
 
 export async function handleMessages(req: Request, res: Response): Promise<void> {
@@ -611,12 +636,24 @@ function looksLikeWriteHeavyPlanText(text: string): boolean {
     const trimmed = text.trim();
     if (!trimmed || trimmed.length > 4000) return false;
 
-    const actionVerbs = /(rewrite|overwrite|replace|patch|fix|repair|remove(?:\s+the)?\s+trailing|strip everything after|write tool|edit tool|fix the file|rewrite the whole|remove those trailing lines|重写|覆盖|修复文件|移除尾部|替换掉)/i;
-    const fileContext = /(file|css|tsx|json|yaml|xml|program\.cs|app\.css|tail|trailing content|garbage|artifact|损坏|文件|尾部|内容|行)/i;
     const directAction = /```json\s+action|"tool"\s*:/i;
-    const summaryMarkers = /(task\s+is\s+complete|the\s+fix\s+is\s+in\s+place|the\s+investigation\s+is\s+complete|here\s+is\s+(?:a\s+)?full\s+summary|here'?s\s+what\s+the\s+error\s+was|问题已解决|根本原因是|根因分析|构建成功)/i;
+    if (directAction.test(trimmed)) return false;
 
-    return actionVerbs.test(trimmed) && fileContext.test(trimmed) && !directAction.test(trimmed) && !summaryMarkers.test(trimmed);
+    const summaryMarkers = /(task\s+is\s+complete|the\s+fix\s+is\s+in\s+place|the\s+investigation\s+is\s+complete|here\s+is\s+(?:a\s+)?full\s+summary|here'?s\s+what\s+the\s+error\s+was|问题已解决|根本原因是|根因分析|构建成功)/i;
+    if (summaryMarkers.test(trimmed)) return false;
+
+    const looksLikeCommitConventionTable = /^\s*\|[^|]+\|/m.test(trimmed)
+        && /\b(?:feat|fix|docs|style|refactor|perf|test|chore|ci|revert)\b.*\|/i.test(trimmed);
+    if (looksLikeCommitConventionTable) return false;
+
+    const looksLikeCommitConventionDocs = /(?:^#+\s|\*\*(?:Breaking Change|Description|Scope|Body|Footer|Type)\*\*)/m.test(trimmed)
+        && /\b(?:Conventional Commits|commitlint|commit message|breaking change|BREAKING CHANGE)\b/i.test(trimmed);
+    if (looksLikeCommitConventionDocs) return false;
+
+    const actionVerbs = /(rewrite|overwrite|replace|patch|fix|repair|remove(?:\s+the)?\s+trailing|strip everything after|write tool|edit tool|fix the file|rewrite the whole|remove those trailing lines|重写|覆盖|修复文件|移除尾部)/i;
+    const fileContext = /(file|css|tsx|json|yaml|xml|program\.cs|app\.css|tail|trailing content|garbage|artifact|损坏|尾部内容|文件损坏|文件尾部|代码文件)/i;
+
+    return actionVerbs.test(trimmed) && fileContext.test(trimmed);
 }
 
 export function shouldForceWriteLikeActionRetry(
@@ -863,6 +900,10 @@ export function getToolModeNoCallFallbackText(
     body?: AnthropicRequest,
     preserveOriginalTextWithoutToolCall = false,
 ): string {
+    if ((body?.tools?.length ?? 0) > 0 && (hasSuspiciousToolResidualText(fullText) || hasSuspiciousToolResidualText(visibleText))) {
+        return 'Let me proceed with the task.';
+    }
+
     if (preserveOriginalTextWithoutToolCall && !requiresToolCall(body)) {
         return body ? sanitizeResponseForRequest(fullText, body) : sanitizeResponse(fullText);
     }
@@ -1469,14 +1510,14 @@ export async function resolveToolResponse(
             const candidateCursorReq = await buildCursorReq();
             const candidateText = await runtimeDeps.sendCursorRequestFull(candidateCursorReq, signal);
             const candidate = await resolveCandidateState(candidateCursorReq, candidateText, truncationLog);
-            console.log(`[Handler] 并发重试分支 ${label} 完成: toolCalls=${candidate.finalized.toolCalls.length}, stillTruncated=${candidate.finalized.stillTruncated}`);
+            console.log(`[Handler] 重试分支 ${label} 完成: toolCalls=${candidate.finalized.toolCalls.length}, stillTruncated=${candidate.finalized.stillTruncated}`);
             return { label, ok: true, candidate };
         } catch (error: unknown) {
             if (shouldPropagateAbortInResolveToolResponse(error, signal)) {
                 throw error;
             }
             const message = error instanceof Error ? error.message : String(error);
-            console.warn(`[Handler] 并发重试分支 ${label} 失败: ${message}`);
+            console.warn(`[Handler] 重试分支 ${label} 失败: ${message}`);
             return { label, ok: false, candidate: null, error: message };
         }
     };
@@ -1505,7 +1546,7 @@ export async function resolveToolResponse(
     }
 
     if (finalized.toolCalls.length === 0 && body && !acceptSafeCompletionSummary) {
-        console.log('[Handler] 未得到可用工具调用，并发执行协议纠正与认知重构重试...');
+        console.log('[Handler] 未得到可用工具调用，先执行协议纠正重试，必要时再回退到认知重构...');
         const originalCandidate: ToolResponseCandidateState = {
             cursorReq: activeCursorReq,
             fullText,
@@ -1514,21 +1555,25 @@ export async function resolveToolResponse(
             thinkingBlocks: [...thinkingBlocks],
         };
 
-        const [protocolCorrectionBranch, cognitiveReframeBranch] = await Promise.all([
-            resolveRetryBranch(
-                'protocol-correction',
-                async () => buildToolRetryCursorRequest(activeCursorReq),
-                '[Handler] 协议纠正响应仍疑似截断，再次尝试阶梯恢复',
-            ),
-            resolveRetryBranch(
+        const protocolCorrectionBranch = await resolveRetryBranch(
+            'protocol-correction',
+            async () => buildToolRetryCursorRequest(activeCursorReq),
+            '[Handler] 协议纠正响应仍疑似截断，再次尝试阶梯恢复',
+        );
+        const protocolCorrectionCandidate = protocolCorrectionBranch.candidate;
+
+        let cognitiveReframeCandidate: ToolResponseCandidateState | null = null;
+        if ((protocolCorrectionCandidate?.finalized.toolCalls.length ?? 0) > 0) {
+            console.log('[Handler] 协议纠正重试已产生工具调用，跳过认知重构回退');
+        } else {
+            console.log('[Handler] 协议纠正未产生工具调用，继续执行认知重构回退...');
+            const cognitiveReframeBranch = await resolveRetryBranch(
                 'cognitive-reframe',
                 async () => runtimeDeps.convertToCursorRequest(buildRetryRequest(body, 0)),
                 '[Handler] 认知重构响应仍疑似截断，最后再尝试一次阶梯恢复',
-            ),
-        ]);
-
-        const protocolCorrectionCandidate = protocolCorrectionBranch.candidate;
-        const cognitiveReframeCandidate = cognitiveReframeBranch.candidate;
+            );
+            cognitiveReframeCandidate = cognitiveReframeBranch.candidate;
+        }
 
         const chosenCandidate = selectConcurrentRetryCandidate(
             originalCandidate,
@@ -1537,10 +1582,10 @@ export async function resolveToolResponse(
         );
 
         if (chosenCandidate === originalCandidate) {
-            console.log('[Handler] 并发重试未产生可用工具调用，保留首次原始响应内容');
+            console.log('[Handler] 顺序重试未产生可用工具调用，保留首次原始响应内容');
             preserveOriginalTextWithoutToolCall = !requiresToolCall(body);
         } else if (chosenCandidate === protocolCorrectionCandidate && (cognitiveReframeCandidate?.finalized.toolCalls.length ?? 0) > 0) {
-            console.log('[Handler] 两个并发重试都产生工具调用，按顺序优先采用协议纠正结果');
+            console.log('[Handler] 两个顺序重试都产生工具调用，按顺序优先采用协议纠正结果');
         } else if (chosenCandidate === protocolCorrectionCandidate) {
             console.log('[Handler] 协议纠正重试产生工具调用，采用该结果');
         } else {
@@ -1806,7 +1851,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
                     cleanText = '';
                 }
 
-                cleanText = sanitizeResponseFragmentForRequest(cleanText, body);
+                cleanText = sanitizeToolVisibleText(cleanText, body);
 
                 // Any clean text is sent as a single block before the tool blocks
                 const unsentCleanText = cleanText.substring(sentText.length).trim();
@@ -2038,7 +2083,7 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
                 cleanText = '';
             }
 
-            cleanText = sanitizeResponseFragmentForRequest(cleanText, body);
+            cleanText = sanitizeToolVisibleText(cleanText, body);
 
             if (cleanText) {
                 contentBlocks.push({ type: 'text', text: cleanText });

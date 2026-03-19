@@ -13,7 +13,7 @@ import express, { type Request, type Response } from 'express';
 import { getAirportRuntimeSnapshot, initAirportRuntime } from './airport-runtime.js';
 import { getConfig } from './config.js';
 import { getProxySubscriptionSnapshot, initProxySubscriptions, reloadProxySubscriptions } from './proxy-subscriptions.js';
-import { initQueue } from './queue.js';
+import { formatQueueRuntimeStatus, getQueue, initQueue } from './queue.js';
 import { handleMessages, listModels, countTokens } from './handler.js';
 import { handleOpenAIChatCompletions, handleOpenAIResponses } from './openai-handler.js';
 import { initWebLogger, getRecentLogs, registerSseClient } from './web-logger.js';
@@ -76,6 +76,18 @@ initQueue({
     retryDelay: config.retryDelay,
     maxRetryDelay: config.maxRetryDelay,
 });
+
+if (config.queueStatusLogIntervalMs > 0) {
+    console.log(`[Queue] 已开启周期状态日志: 间隔=${config.queueStatusLogIntervalMs}ms, ${formatQueueRuntimeStatus(getQueue())}`);
+    const queueStatusTimer = setInterval(() => {
+        console.log(`[Queue] 周期状态: ${formatQueueRuntimeStatus(getQueue())}`);
+    }, config.queueStatusLogIntervalMs);
+    if (typeof queueStatusTimer.unref === 'function') {
+        queueStatusTimer.unref();
+    }
+} else {
+    console.log('[Queue] 周期状态日志已关闭 (QUEUE_STATUS_LOG_INTERVAL_MS <= 0)');
+}
 
 // 解析 JSON body（增大限制以支持 base64 图片，单张图片可达 10MB+）
 app.use(express.json({ limit: '50mb' }));

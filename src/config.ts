@@ -27,10 +27,18 @@ function finiteIntOr(raw: unknown, fallback: number): number {
     return parsed === undefined ? fallback : parsed;
 }
 
+function intervalMsOrOff(raw: unknown, fallback: number, minimumWhenEnabled: number): number {
+    const parsed = readFiniteInt(raw);
+    if (parsed === undefined) return fallback;
+    if (parsed <= 0) return 0;
+    return Math.max(minimumWhenEnabled, parsed);
+}
+
 function normalizeCoreConfig(current: AppConfig): void {
     current.port = Math.max(1, finiteIntOr(current.port, 3010));
     current.timeout = Math.max(1, finiteIntOr(current.timeout, 120));
     current.concurrency = Math.max(1, finiteIntOr(current.concurrency, 3));
+    current.queueStatusLogIntervalMs = intervalMsOrOff(current.queueStatusLogIntervalMs, 60_000, 5_000);
     current.queueTimeout = Math.max(1_000, finiteIntOr(current.queueTimeout, 120_000));
     current.retryDelay = Math.max(0, finiteIntOr(current.retryDelay, 5_000));
     current.maxRetryDelay = Math.max(current.retryDelay, finiteIntOr(current.maxRetryDelay, 60_000));
@@ -246,6 +254,7 @@ export function getConfig(): AppConfig {
         timeout: 120,
         cursorModel: 'anthropic/claude-sonnet-4.6',
         concurrency: 3,
+        queueStatusLogIntervalMs: 60_000,
         queueTimeout: 120_000,
         retryDelay: 5_000,
         maxRetryDelay: 60_000,
@@ -290,6 +299,8 @@ export function getConfig(): AppConfig {
             if (yaml.proxy) config.proxy = yaml.proxy;
             if (yaml.cursor_model) config.cursorModel = yaml.cursor_model;
             if (yaml.concurrency) config.concurrency = yaml.concurrency;
+            const queueStatusLogIntervalMs = readFiniteInt(yaml.queue_status_log_interval_ms);
+            if (queueStatusLogIntervalMs !== undefined) config.queueStatusLogIntervalMs = queueStatusLogIntervalMs;
             if (yaml.queue_timeout) config.queueTimeout = yaml.queue_timeout;
             if (yaml.retry_delay) config.retryDelay = yaml.retry_delay;
             if (yaml.max_retry_delay) config.maxRetryDelay = yaml.max_retry_delay;
@@ -367,6 +378,8 @@ export function getConfig(): AppConfig {
     if (process.env.PROXY) config.proxy = process.env.PROXY;
     if (process.env.CURSOR_MODEL) config.cursorModel = process.env.CURSOR_MODEL;
     if (process.env.CONCURRENCY) config.concurrency = parseInt(process.env.CONCURRENCY);
+    const envQueueStatusLogIntervalMs = readFiniteInt(process.env.QUEUE_STATUS_LOG_INTERVAL_MS);
+    if (envQueueStatusLogIntervalMs !== undefined) config.queueStatusLogIntervalMs = envQueueStatusLogIntervalMs;
     if (process.env.QUEUE_TIMEOUT) config.queueTimeout = parseInt(process.env.QUEUE_TIMEOUT);
     if (process.env.RETRY_DELAY) config.retryDelay = parseInt(process.env.RETRY_DELAY);
     if (process.env.MAX_RETRY_DELAY) config.maxRetryDelay = parseInt(process.env.MAX_RETRY_DELAY);

@@ -20,10 +20,11 @@ enable_thinking: false
 #   "*": "anthropic/claude-sonnet-4.6"
 
 # 并发队列配置（可选）
-# concurrency: 3         # 最大并发请求数
-# queue_timeout: 120000  # 队列等待超时时间（毫秒）
-# retry_delay: 5000      # 429 初始退避时间（毫秒）
-# max_retry_delay: 60000 # 429 退避时间上限（毫秒）
+# concurrency: 3                    # 最大并发请求数
+# queue_status_log_interval_ms: 60000 # 周期打印并发/队列状态（毫秒，<=0 关闭）
+# queue_timeout: 120000             # 队列等待超时时间（毫秒）
+# retry_delay: 5000                 # 429 初始退避时间（毫秒）
+# max_retry_delay: 60000            # 429 退避时间上限（毫秒）
 
 # 代理订阅配置（可选）
 # 说明：仅支持导入 HTTP/HTTPS/SOCKS 代理地址，不能直接使用 vmess/vless/trojan 等节点协议。

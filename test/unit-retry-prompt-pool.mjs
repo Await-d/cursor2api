@@ -594,6 +594,36 @@ await test('resolveToolResponse rethrows aborts during concurrent retry fan-out'
     );
 });
 
+await test('resolveToolResponse skips cognitive fallback when protocol retry already yields tools', async () => {
+    const body = buildResolveToolBody();
+    const cursorReq = buildCursorRequest();
+    let sendCount = 0;
+    let convertCount = 0;
+
+    const resolved = await resolveToolResponse(
+        cursorReq,
+        'Investigating the repository now.',
+        body,
+        undefined,
+        {
+            sendCursorRequestFull: async () => {
+                sendCount++;
+                return '```json action\n{"tool":"Read","parameters":{"path":"src/handler.ts"}}\n```';
+            },
+            convertToCursorRequest: async () => {
+                convertCount++;
+                return { ...cursorReq, id: 'cognitive-branch' };
+            },
+            recoverTruncatedToolResponse: async () => 'unused',
+        },
+    );
+
+    assert(resolved.toolCalls.length === 1, 'protocol retry should still provide the selected tool call');
+    assert(resolved.toolCalls[0]?.name === 'Read', 'protocol retry tool call should be preserved');
+    assert(sendCount === 1, `expected 1 retry send when protocol correction succeeds, got ${sendCount}`);
+    assert(convertCount === 0, `expected cognitive fallback to be skipped, got ${convertCount} conversions`);
+});
+
 await test('resolveToolResponse keeps strict tool calls when truncation recovery fails in one branch', async () => {
     const body = buildResolveToolBody();
     const cursorReq = buildCursorRequest();

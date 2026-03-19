@@ -9,6 +9,8 @@ import {
     shouldForceWaitingActionRetry,
     shouldForceWriteLikeActionRetry,
     getToolModeNoCallFallbackText,
+    hasSuspiciousToolResidualText,
+    sanitizeToolVisibleText,
     buildToolRetryCursorRequest,
     buildForcedToolActionRetryCursorRequest,
     normalizeToolCallsForSchemas,
@@ -56,6 +58,35 @@ test('普通引号说明文本保持不变', () => {
     const input = `The empty string is written as "" in JSON.`;
     const result = sanitizeResponse(input);
     assertEqual(result, input);
+});
+
+test('工具残留检测会识别 edit 参数字段', () => {
+    const input = `\n"replaceAll": false`;
+    assert(hasSuspiciousToolResidualText(input), '应识别 tool 字段残留');
+});
+
+test('工具可见文本清洗会抑制 pasted + replaceAll 残留', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'fix it' }],
+        tools: [{ name: 'edit', input_schema: { type: 'object', properties: {} } }],
+    };
+    const input = `\n  } catch (_e) {\n    // 路径不存在，继续向上查找\n  }",\n"replaceAll": false`;
+    const result = sanitizeToolVisibleText(input, body);
+    assertEqual(result, '');
+});
+
+test('工具无调用回退会压制可疑 edit 参数残留', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'fix it' }],
+        tools: [{ name: 'edit', input_schema: { type: 'object', properties: {} } }],
+    };
+    const input = `\n"replaceAll": false`;
+    const result = getToolModeNoCallFallbackText(input, input, false, body, false);
+    assertEqual(result, 'Let me proceed with the task.');
 });
 
 console.log('\n📦 sanitizeResponse first-turn fallback\n');
