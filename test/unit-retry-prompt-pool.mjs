@@ -344,6 +344,37 @@ await test('later tool turns skip first-turn anti-Cursor guardrails', async () =
     assert(!firstUserTurn.includes('For this first reply, avoid mentioning Cursor'), 'later tool user turns should not carry first-turn-only suffixes');
 });
 
+await test('first-turn tool prompt allows Cursor mentions when the user explicitly asked about Cursor', async () => {
+    const request = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        tools: [{ name: 'Read', description: 'Read a file', input_schema: { type: 'object', properties: { filePath: { type: 'string' } } } }],
+        messages: [{ role: 'user', content: 'In Cursor, how do I configure project rules?' }],
+    };
+    const cursorReq = await convertToCursorRequest(request);
+    const firstPrompt = cursorReq.messages[0]?.parts[0]?.text || '';
+    const firstUserTurn = cursorReq.messages[2]?.parts[0]?.text || '';
+
+    assert(!firstPrompt.includes('Do not mention Cursor, documentation systems'), 'tool prompt should not blanket-forbid Cursor when the user explicitly mentioned Cursor');
+    assert(!firstUserTurn.includes('avoid mentioning Cursor'), 'tool user suffix should not blanket-forbid Cursor when the user explicitly mentioned Cursor');
+    assert(firstPrompt.includes('Cursor support assistant'), 'identity-disclaimer blocklist should still remain active');
+});
+
+await test('first-turn tool prompt also allows lowercase cursor mentions when the user asked about cursor', async () => {
+    const request = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        tools: [{ name: 'Read', description: 'Read a file', input_schema: { type: 'object', properties: { filePath: { type: 'string' } } } }],
+        messages: [{ role: 'user', content: 'in cursor, how do I configure project rules?' }],
+    };
+    const cursorReq = await convertToCursorRequest(request);
+    const firstPrompt = cursorReq.messages[0]?.parts[0]?.text || '';
+    const firstUserTurn = cursorReq.messages[2]?.parts[0]?.text || '';
+
+    assert(!firstPrompt.includes('Do not mention Cursor, documentation systems'), 'tool prompt should not blanket-forbid Cursor for lowercase cursor user queries either');
+    assert(!firstUserTurn.includes('avoid mentioning Cursor'), 'tool user suffix should not blanket-forbid Cursor for lowercase cursor user queries either');
+});
+
 await test('first-turn non-tool prompt adds anti-Cursor guardrails', async () => {
     const request = buildInitialChatRequest();
     const cursorReq = await convertToCursorRequest(request);
@@ -353,6 +384,31 @@ await test('first-turn non-tool prompt adds anti-Cursor guardrails', async () =>
     assert(firstUserTurn.includes('This is the first reply to the user in this conversation.'), 'initial non-tool prompt should call out first-turn handling');
     assert(firstUserTurn.includes('Do not mention Cursor'), 'initial non-tool prompt should explicitly suppress Cursor mentions');
     assert(firstUserTurn.includes('Cursor support assistant'), 'initial non-tool prompt should explicitly block Cursor support-assistant identity disclaimers');
+});
+
+await test('first-turn non-tool prompt allows Cursor mentions when the user explicitly asked about Cursor', async () => {
+    const request = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        messages: [{ role: 'user', content: 'How do I change Cursor theme settings?' }],
+    };
+    const cursorReq = await convertToCursorRequest(request);
+    const firstUserTurn = cursorReq.messages[0]?.parts[0]?.text || '';
+
+    assert(!firstUserTurn.includes('Do not mention Cursor, documentation systems'), 'chat prompt should not blanket-forbid Cursor when the user explicitly mentioned Cursor');
+    assert(firstUserTurn.includes('Cursor support assistant'), 'chat prompt should still block support-assistant disclaimers');
+});
+
+await test('first-turn non-tool prompt also allows lowercase cursor mentions when the user asked about cursor', async () => {
+    const request = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        messages: [{ role: 'user', content: 'how do I change cursor theme settings?' }],
+    };
+    const cursorReq = await convertToCursorRequest(request);
+    const firstUserTurn = cursorReq.messages[0]?.parts[0]?.text || '';
+
+    assert(!firstUserTurn.includes('Do not mention Cursor, documentation systems'), 'chat prompt should not blanket-forbid Cursor for lowercase cursor user queries either');
 });
 
 await test('later non-tool turns keep workflow framing without first-turn guardrails', async () => {
