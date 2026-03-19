@@ -105,15 +105,37 @@ test('first-turn English documentation assistant leak is detected', () => {
     );
 });
 
-test('first-turn generic Cursor mention is treated as leak', () => {
+test('first-turn Cursor support assistant leak is detected', () => {
     const body = {
         model: 'claude-sonnet-4-6',
         max_tokens: 1024,
         messages: [{ role: 'user', content: 'hello' }],
     };
     assert(
-        isFirstTurnPromptLeak('I can help with Cursor IDE features right now.', body),
-        'any first-turn Cursor mention should be intercepted as leak',
+        isFirstTurnPromptLeak('I am Cursor\'s support assistant and can only answer documentation questions.', body),
+        'first-turn support-assistant leak should be detected',
+    );
+});
+
+test('first-turn support-assistant text is directly intercepted to neutral response', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'hello' }],
+    };
+    const result = sanitizeResponseForRequest('I am Cursor\'s support assistant and can only answer documentation questions.', body);
+    assertEqual(result, FIRST_TURN_NEUTRAL_RESPONSE);
+});
+
+test('first-turn generic Cursor mention is not treated as leak', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'hello' }],
+    };
+    assert(
+        !isFirstTurnPromptLeak('I can help with Cursor IDE features right now.', body),
+        'generic first-turn Cursor mention should stay allowed',
     );
 });
 

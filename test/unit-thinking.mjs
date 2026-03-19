@@ -157,6 +157,25 @@ test('convertToAnthropicRequest maps required tool_choice to any', () => {
     assertEqual(result.tools?.length, 1);
 });
 
+test('convertToAnthropicRequest maps any tool_choice to any', () => {
+    const result = convertToAnthropicRequest({
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'Use any tool that helps' }],
+        tools: [{
+            type: 'function',
+            function: {
+                name: 'Read',
+                description: 'Read file contents',
+                parameters: { type: 'object', properties: { path: { type: 'string' } } },
+            },
+        }],
+        tool_choice: 'any',
+    });
+
+    assertEqual(result.tool_choice, { type: 'any' });
+    assertEqual(result.tools?.length, 1);
+});
+
 test('convertToAnthropicRequest maps function tool_choice to specific tool', () => {
     const result = convertToAnthropicRequest({
         model: 'gpt-5',

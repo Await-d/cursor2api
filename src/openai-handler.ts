@@ -218,6 +218,14 @@ function createAbortSignal(req: Request, res: Response): AbortSignal {
     return controller.signal;
 }
 
+type OpenAIHandlerDeps = {
+    convertToCursorRequest: typeof convertToCursorRequest;
+    sendCursorRequestFull: typeof sendCursorRequestFull;
+    sendCursorRequest: typeof sendCursorRequest;
+    resolveToolResponse: typeof resolveToolResponse;
+    createAbortSignal: (req: Request, res: Response) => AbortSignal;
+}
+
 // ==================== 请求转换：OpenAI → Anthropic ====================
 
 /**
@@ -426,8 +434,18 @@ function extractOpenAIContent(msg: OpenAIMessage): string {
 
 // ==================== 主处理入口 ====================
 
-export async function handleOpenAIChatCompletions(req: Request, res: Response): Promise<void> {
+export async function handleOpenAIChatCompletions(req: Request, res: Response): Promise<void>;
+export async function handleOpenAIChatCompletions(req: Request, res: Response, deps: Partial<OpenAIHandlerDeps>): Promise<void>;
+export async function handleOpenAIChatCompletions(req: Request, res: Response, deps: Partial<OpenAIHandlerDeps> = {}): Promise<void> {
     const body = req.body as OpenAIChatRequest;
+    const runtimeDeps: OpenAIHandlerDeps = {
+        convertToCursorRequest,
+        sendCursorRequestFull,
+        sendCursorRequest,
+        resolveToolResponse,
+        createAbortSignal,
+        ...deps,
+    };
 
     console.log(`[OpenAI] 收到请求: model=${body.model}, messages=${body.messages?.length}, stream=${body.stream}, tools=${body.tools?.length ?? 0}`);
 
@@ -453,13 +471,13 @@ export async function handleOpenAIChatCompletions(req: Request, res: Response): 
         }
 
         // Step 2: Anthropic → Cursor 格式（复用现有管道）
-        const cursorReq = await convertToCursorRequest(anthropicReq);
-        const abortSignal = createAbortSignal(req, res);
+        const cursorReq = await runtimeDeps.convertToCursorRequest(anthropicReq);
+        const abortSignal = runtimeDeps.createAbortSignal(req, res);
 
         if (body.stream) {
-            await handleOpenAIStream(res, cursorReq, body, anthropicReq, abortSignal);
+            await handleOpenAIStream(res, cursorReq, body, anthropicReq, abortSignal, runtimeDeps);
         } else {
-            await handleOpenAINonStream(res, cursorReq, body, anthropicReq, abortSignal);
+            await handleOpenAINonStream(res, cursorReq, body, anthropicReq, abortSignal, runtimeDeps);
         }
     } catch (err: unknown) {
         if (isAbortError(err)) {
@@ -525,6 +543,7 @@ async function handleOpenAIStream(
     body: OpenAIChatRequest,
     anthropicReq: AnthropicRequest,
     signal: AbortSignal,
+    deps: OpenAIHandlerDeps,
 ): Promise<void> {
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
@@ -556,7 +575,7 @@ async function handleOpenAIStream(
     // 统一缓冲模式：先缓冲全部响应，再检测拒绝和处理
     const executeStream = async () => {
         fullResponse = '';
-        await sendCursorRequest(activeCursorReq, (event: CursorSSEEvent) => {
+        await deps.sendCursorRequest(activeCursorReq, (event: CursorSSEEvent) => {
             if (event.type !== 'text-delta' || !event.delta) return;
             fullResponse += event.delta;
         }, signal);
@@ -580,7 +599,7 @@ async function handleOpenAIStream(
             retryCount++;
             console.log(`[OpenAI] 检测到首轮泄漏/拒绝（第${retryCount}次），自动重试...原始: ${fullResponse.substring(0, 100)}`);
             const retryBody = buildRetryRequest(anthropicReq, retryCount - 1);
-            activeCursorReq = await convertToCursorRequest(retryBody);
+            activeCursorReq = await deps.convertToCursorRequest(retryBody);
             await executeStream();
         }
         if (shouldRetryResponse()) {
@@ -597,8 +616,7 @@ async function handleOpenAIStream(
                     fullResponse = CLAUDE_IDENTITY_RESPONSE;
                 }
             } else {
-                console.log(`[OpenAI] 工具模式下首轮泄漏/拒绝且无工具调用，引导模型输出`);
-                fullResponse = 'I understand the request. Let me analyze the information and proceed with the appropriate action.';
+                console.log('[OpenAI] 工具模式下首轮泄漏/拒绝且无工具调用，保留原始响应交给后续 tool resolver 强制动作');
             }
         }
 
@@ -606,7 +624,7 @@ async function handleOpenAIStream(
         if (hasTools && fullResponse.trim().length < 10 && retryCount < MAX_REFUSAL_RETRIES) {
             retryCount++;
             console.log(`[OpenAI] 响应过短 (${fullResponse.length} chars)，重试第${retryCount}次`);
-            activeCursorReq = await convertToCursorRequest(anthropicReq);
+            activeCursorReq = await deps.convertToCursorRequest(anthropicReq);
             await executeStream();
         }
 
@@ -616,7 +634,7 @@ async function handleOpenAIStream(
         let completionToolCalls: OpenAIToolCall[] | undefined;
 
         if (hasTools) {
-            const resolved = await resolveToolResponse(activeCursorReq, fullResponse, anthropicReq, signal);
+            const resolved = await deps.resolveToolResponse(activeCursorReq, fullResponse, anthropicReq, signal);
             fullResponse = resolved.fullText;
             completionReasoningContent = resolved.thinkingBlocks.length > 0
                 ? resolved.thinkingBlocks.map(block => block.thinking).join('\n\n')
@@ -639,7 +657,7 @@ async function handleOpenAIStream(
                 finishReason = getOpenAIToolFinishReason(resolved);
 
                 // 发送工具调用前的残余文本（清洗后）
-                let cleanOutput = isRefusal(cleanText) ? '' : cleanText;
+                let cleanOutput = (isRefusal(cleanText) || isFirstTurnPromptLeak(cleanText, anthropicReq)) ? '' : cleanText;
                 cleanOutput = normalizeOpenAIOutputText(cleanOutput, body.response_format, anthropicReq);
                 completionContent = cleanOutput;
                 if (cleanOutput) {
@@ -805,9 +823,10 @@ async function handleOpenAINonStream(
     body: OpenAIChatRequest,
     anthropicReq: AnthropicRequest,
     signal: AbortSignal,
+    deps: OpenAIHandlerDeps,
 ): Promise<void> {
     let activeCursorReq = cursorReq;
-    let fullText = await sendCursorRequestFull(activeCursorReq, signal);
+    let fullText = await deps.sendCursorRequestFull(activeCursorReq, signal);
     const hasTools = (body.tools?.length ?? 0) > 0;
     const thinkingEnabled = isAnthropicThinkingEnabled(anthropicReq.thinking, getConfig().enableThinking);
 
@@ -824,16 +843,15 @@ async function handleOpenAINonStream(
         for (let attempt = 0; attempt < MAX_REFUSAL_RETRIES; attempt++) {
             console.log(`[OpenAI] 非流式：检测到拒绝（第${attempt + 1}次重试）...原始: ${fullText.substring(0, 100)}`);
             const retryBody = buildRetryRequest(anthropicReq, attempt);
-            const retryCursorReq = await convertToCursorRequest(retryBody);
+            const retryCursorReq = await deps.convertToCursorRequest(retryBody);
             activeCursorReq = retryCursorReq;
-            fullText = await sendCursorRequestFull(retryCursorReq, signal);
+            fullText = await deps.sendCursorRequestFull(retryCursorReq, signal);
             if (!shouldRetry()) break;
         }
         if (shouldRetry()) {
             const leakedFirstTurn = isFirstTurnPromptLeak(extractThinkingIfEnabled(fullText, thinkingEnabled).cleanText, anthropicReq);
             if (hasTools) {
-                console.log(`[OpenAI] 非流式：工具模式下首轮泄漏/拒绝，引导模型输出`);
-                fullText = 'I understand the request. Let me analyze the information and proceed with the appropriate action.';
+                console.log('[OpenAI] 非流式：工具模式下首轮泄漏/拒绝，保留原始响应交给后续 tool resolver 强制动作');
             } else if (leakedFirstTurn) {
                 console.log('[OpenAI] 非流式：首轮提示词泄漏重试后仍存在，返回中性首轮回复');
                 fullText = FIRST_TURN_NEUTRAL_RESPONSE;
@@ -853,7 +871,7 @@ async function handleOpenAINonStream(
     let finishReason: 'stop' | 'tool_calls' | 'length' = isTruncated(fullText) ? 'length' : 'stop';
 
     if (hasTools) {
-        const resolved = await resolveToolResponse(activeCursorReq, fullText, anthropicReq, signal);
+        const resolved = await deps.resolveToolResponse(activeCursorReq, fullText, anthropicReq, signal);
         fullText = resolved.fullText;
         reasoningContent = resolved.thinkingBlocks.length > 0
             ? resolved.thinkingBlocks.map(block => block.thinking).join('\n\n')
@@ -864,7 +882,7 @@ async function handleOpenAINonStream(
             finishReason = getOpenAIToolFinishReason(resolved);
             // 清洗拒绝文本
             let cleanText = parsed.cleanText;
-            if (isRefusal(cleanText)) {
+            if (isRefusal(cleanText) || isFirstTurnPromptLeak(cleanText, anthropicReq)) {
                 console.log(`[OpenAI] 抑制工具模式下的拒绝文本: ${cleanText.substring(0, 100)}...`);
                 cleanText = '';
             }
@@ -881,7 +899,13 @@ async function handleOpenAINonStream(
         } else {
             finishReason = getOpenAIToolFinishReason(resolved);
             content = normalizeOpenAIOutputText(
-                getToolModeNoCallFallbackText(fullText, resolved.stillTruncated ? resolved.cleanText : fullText, resolved.stillTruncated, anthropicReq),
+                getToolModeNoCallFallbackText(
+                    fullText,
+                    resolved.stillTruncated ? resolved.cleanText : fullText,
+                    resolved.stillTruncated,
+                    anthropicReq,
+                    resolved.preserveOriginalTextWithoutToolCall,
+                ),
                 body.response_format,
                 anthropicReq,
             );
@@ -945,7 +969,9 @@ function writeOpenAISSE(res: Response, data: OpenAIChatCompletionChunk): void {
  * Cursor IDE 对 GPT 模型发送 OpenAI Responses API 格式请求，
  * 这里将其转换为 Chat Completions 格式后复用现有管道
  */
-export async function handleOpenAIResponses(req: Request, res: Response): Promise<void> {
+export async function handleOpenAIResponses(req: Request, res: Response): Promise<void>;
+export async function handleOpenAIResponses(req: Request, res: Response, deps: Partial<OpenAIHandlerDeps>): Promise<void>;
+export async function handleOpenAIResponses(req: Request, res: Response, deps: Partial<OpenAIHandlerDeps> = {}): Promise<void> {
     try {
         const body = req.body;
         console.log(`[OpenAI] 收到 /v1/responses 请求: model=${body.model}`);
@@ -955,7 +981,7 @@ export async function handleOpenAIResponses(req: Request, res: Response): Promis
 
         // 此后复用现有管道
         req.body = chatBody;
-        return handleOpenAIChatCompletions(req, res);
+        return handleOpenAIChatCompletions(req, res, deps);
     } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[OpenAI] /v1/responses 处理失败:`, message);

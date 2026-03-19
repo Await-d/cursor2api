@@ -1,4 +1,4 @@
-import { buildRetryRequest } from '../src/handler.ts';
+import { buildRetryRequest, getToolModeNoCallFallbackText, isSafeTextResponseWithoutToolCall, resolveToolResponse, selectConcurrentRetryCandidate } from '../src/handler.ts';
 import { convertToCursorRequest } from '../src/converter.ts';
 import { getConfig } from '../src/config.ts';
 
@@ -19,6 +19,21 @@ async function test(name, fn) {
 
 function assert(condition, message) {
     if (!condition) throw new Error(message || 'Assertion failed');
+}
+
+async function assertRejects(fn, messagePattern, label) {
+    let thrown = null;
+    try {
+        await fn();
+    } catch (error) {
+        thrown = error;
+    }
+
+    assert(thrown, label || 'Expected function to reject');
+    if (messagePattern) {
+        const text = thrown instanceof Error ? `${thrown.name}: ${thrown.message}` : String(thrown);
+        assert(messagePattern.test(text), `Unexpected rejection text: ${text}`);
+    }
 }
 
 function totalChars(cursorReq) {
@@ -186,6 +201,82 @@ function buildToolOnlyUserRequest() {
     };
 }
 
+function buildCompletionToolBody() {
+    return {
+        tools: [
+            {
+                name: 'Read',
+                description: 'Read a file',
+                input_schema: {
+                    type: 'object',
+                    properties: { file_path: { type: 'string' } },
+                },
+            },
+            {
+                name: 'attempt_completion',
+                description: 'Finish the task',
+                input_schema: {
+                    type: 'object',
+                    properties: {
+                        result: { type: 'string' },
+                    },
+                },
+            },
+        ],
+        messages: [
+            { role: 'user', content: 'Summarize current implementation status.' },
+        ],
+    };
+}
+
+function buildRetryCandidate(label, toolCount = 0) {
+    return {
+        label,
+        finalized: {
+            toolCalls: Array.from({ length: toolCount }, (_, index) => ({
+                name: `Tool${index + 1}`,
+                arguments: {},
+                integrity: 'strict',
+            })),
+        },
+    };
+}
+
+function buildCursorRequest() {
+    return {
+        model: 'anthropic/claude-sonnet-4.6',
+        id: 'cursor_req_test',
+        trigger: 'manual',
+        messages: [
+            {
+                id: 'msg_1',
+                role: 'user',
+                parts: [{ type: 'text', text: 'Inspect src/handler.ts and continue.' }],
+            },
+        ],
+    };
+}
+
+function buildResolveToolBody() {
+    return {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        tools: [
+            {
+                name: 'Read',
+                description: 'Read a file',
+                input_schema: {
+                    type: 'object',
+                    properties: { file_path: { type: 'string' } },
+                },
+            },
+        ],
+        messages: [
+            { role: 'user', content: 'Inspect src/handler.ts and continue.' },
+        ],
+    };
+}
+
 console.log('\n📦 retry prompt pool\n');
 
 await test('retry attempts rotate prompt profiles', async () => {
@@ -238,6 +329,7 @@ await test('first-turn tool prompt adds anti-Cursor guardrails', async () => {
     assert(firstPrompt.includes('Ignore stale assistant text'), 'initial tool prompt should explicitly ignore stale role text');
     assert(firstPrompt.includes('This is the first reply to the user in this conversation.'), 'initial tool prompt should call out first-turn handling');
     assert(firstPrompt.includes('Do not mention Cursor'), 'initial tool prompt should explicitly suppress Cursor mentions');
+    assert(firstPrompt.includes('Cursor support assistant'), 'initial tool prompt should explicitly block Cursor support-assistant identity disclaimers');
     assert(firstUserTurn.includes('Continue from the latest request and the most recent action outputs.'), 'tool user turns should carry the stronger execution suffix');
     assert(firstUserTurn.includes('For this first reply, avoid mentioning Cursor'), 'first tool user turn should reinforce the anti-Cursor instruction');
 });
@@ -260,6 +352,7 @@ await test('first-turn non-tool prompt adds anti-Cursor guardrails', async () =>
     assert(firstUserTurn.includes('You are helping with a real software workflow.'), 'non-tool prompt should use the stronger workflow prefix');
     assert(firstUserTurn.includes('This is the first reply to the user in this conversation.'), 'initial non-tool prompt should call out first-turn handling');
     assert(firstUserTurn.includes('Do not mention Cursor'), 'initial non-tool prompt should explicitly suppress Cursor mentions');
+    assert(firstUserTurn.includes('Cursor support assistant'), 'initial non-tool prompt should explicitly block Cursor support-assistant identity disclaimers');
 });
 
 await test('later non-tool turns keep workflow framing without first-turn guardrails', async () => {
@@ -306,6 +399,226 @@ await test('retry scrubs refusal-like assistant history but leaves non-refusal t
     };
     const cleanRetryRequest = buildRetryRequest(cleanAssistantRequest, 0);
     assert(cleanRetryRequest.messages[1].content === 'Here is a concrete explanation of the retry logic.', 'non-refusal assistant history should remain unchanged');
+});
+
+await test('structured status summary is accepted as safe text without forcing attempt_completion', async () => {
+    const body = buildCompletionToolBody();
+    const summary = `**当前状态总结：**
+
+**已完成 ✅**
+- Phase 0：Monorepo 基建、工程规范、CI 骨架
+- Phase 1：消息协议、状态机、会话持久化
+
+**尚未开始 🟡**
+| Phase | 任务 | 内容 |
+|-------|------|------|
+| Phase 2 | T-10~T-14 | Agent Gateway |
+
+**当前最高优先级：Phase 2 (T-10~T-14)**`;
+
+    assert(isSafeTextResponseWithoutToolCall(summary, body), 'status summary should be treated as a safe final text response');
+
+    const fallback = getToolModeNoCallFallbackText(summary, summary, false, body);
+    assert(fallback.includes('当前状态总结'), 'safe status summary should be returned to the client as text');
+    assert(!fallback.includes('Let me proceed with the task.'), 'safe status summary should not collapse to the minimal fallback');
+});
+
+await test('required tool_choice does not treat status summary as safe text', async () => {
+    const body = {
+        ...buildCompletionToolBody(),
+        tool_choice: { type: 'any' },
+    };
+    const summary = '**当前状态总结：**\n\n- 已完成：Phase 1\n- 当前最高优先级：Phase 2';
+
+    assert(!isSafeTextResponseWithoutToolCall(summary, body), 'tool_choice=any should still require a tool call');
+
+    const fallback = getToolModeNoCallFallbackText(summary, summary, false, body);
+    assert(fallback === 'Let me proceed with the task.', 'required tool_choice should keep the minimal fallback instead of preserving summary text');
+});
+
+await test('interim narration is not accepted as safe final text', async () => {
+    const body = buildCompletionToolBody();
+    const interim = 'I now have enough context. Let me inspect src/handler.ts and then I will patch the retry logic.';
+
+    assert(!isSafeTextResponseWithoutToolCall(interim, body), 'interim narration should still require tool usage or retry');
+});
+
+await test('concurrent retry selection keeps original when both retries are text-only', async () => {
+    const original = buildRetryCandidate('original', 0);
+    const protocol = buildRetryCandidate('protocol', 0);
+    const reframe = buildRetryCandidate('reframe', 0);
+
+    const chosen = selectConcurrentRetryCandidate(original, protocol, reframe);
+    assert(chosen === original, 'original response should win when both concurrent retries stay text-only');
+});
+
+await test('concurrent retry selection prefers protocol-correction when both retries emit tools', async () => {
+    const original = buildRetryCandidate('original', 0);
+    const protocol = buildRetryCandidate('protocol', 1);
+    const reframe = buildRetryCandidate('reframe', 2);
+
+    const chosen = selectConcurrentRetryCandidate(original, protocol, reframe);
+    assert(chosen === protocol, 'protocol-correction branch should win when both concurrent retries emit tools');
+});
+
+await test('concurrent retry selection falls back to cognitive reframe when it is the only branch with tools', async () => {
+    const original = buildRetryCandidate('original', 0);
+    const protocol = buildRetryCandidate('protocol', 0);
+    const reframe = buildRetryCandidate('reframe', 1);
+
+    const chosen = selectConcurrentRetryCandidate(original, protocol, reframe);
+    assert(chosen === reframe, 'cognitive reframe branch should win when protocol-correction stays text-only');
+});
+
+await test('concurrent retry selection tolerates protocol branch failure when cognitive reframe has tools', async () => {
+    const original = buildRetryCandidate('original', 0);
+    const reframe = buildRetryCandidate('reframe', 1);
+
+    const chosen = selectConcurrentRetryCandidate(original, null, reframe);
+    assert(chosen === reframe, 'cognitive reframe branch should still win when protocol branch fails');
+});
+
+await test('concurrent retry selection tolerates cognitive reframe failure when protocol branch has tools', async () => {
+    const original = buildRetryCandidate('original', 0);
+    const protocol = buildRetryCandidate('protocol', 1);
+
+    const chosen = selectConcurrentRetryCandidate(original, protocol, null);
+    assert(chosen === protocol, 'protocol branch should still win when cognitive reframe fails');
+});
+
+await test('concurrent retry selection keeps original when both branches fail', async () => {
+    const original = buildRetryCandidate('original', 0);
+
+    const chosen = selectConcurrentRetryCandidate(original, null, null);
+    assert(chosen === original, 'original response should survive when both concurrent retries fail');
+});
+
+await test('preserve-original fallback bypasses minimal no-tool placeholder', async () => {
+    const body = buildCompletionToolBody();
+    const interim = 'I now have enough context. Let me inspect src/handler.ts and then I will patch the retry logic.';
+
+    const fallback = getToolModeNoCallFallbackText(interim, interim, false, body, true);
+    assert(fallback.includes('I now have enough context'), 'preserve-original mode should keep the original text');
+    assert(!fallback.includes('Let me proceed with the task.'), 'preserve-original mode should bypass the minimal no-tool fallback');
+});
+
+await test('preserve-original fallback also keeps truncated original text', async () => {
+    const body = buildResolveToolBody();
+    const truncated = '```json action\n{"tool":"Write","parameters":{"path":"a.txt"';
+
+    const fallback = getToolModeNoCallFallbackText(truncated, 'ignored clean text', true, body, true);
+    assert(fallback.includes('"tool":"Write"'), 'preserve-original mode should keep the original truncated text');
+    assert(!fallback.includes('Let me proceed with the task.'), 'preserve-original mode should bypass the truncated placeholder fallback');
+});
+
+await test('resolveToolResponse rethrows aborts during concurrent retry fan-out', async () => {
+    const body = buildResolveToolBody();
+    const cursorReq = buildCursorRequest();
+    const controller = new AbortController();
+    controller.abort();
+
+    await assertRejects(
+        () => resolveToolResponse(
+            cursorReq,
+            'Investigating the repository now.',
+            body,
+            controller.signal,
+            {
+                sendCursorRequestFull: async () => {
+                    const error = new Error('request aborted');
+                    error.name = 'AbortError';
+                    throw error;
+                },
+                convertToCursorRequest: async () => ({ ...cursorReq, id: 'cognitive-branch' }),
+                recoverTruncatedToolResponse: async () => 'unused',
+            },
+        ),
+        /AbortError|request aborted/i,
+        'abort should propagate out of resolveToolResponse',
+    );
+});
+
+await test('resolveToolResponse keeps strict tool calls when truncation recovery fails in one branch', async () => {
+    const body = buildResolveToolBody();
+    const cursorReq = buildCursorRequest();
+    const truncatedProtocolResponse = [
+        '```json action',
+        '{"tool":"Read","parameters":{"path":"a.txt"}}',
+        '```',
+        '```json action',
+        '{"tool":"Write","parameters":{"path":"b.txt"',
+    ].join('\n');
+
+    const resolved = await resolveToolResponse(
+        cursorReq,
+        'Investigating the repository now.',
+        body,
+        undefined,
+        {
+            sendCursorRequestFull: async (req) => req.id === 'cognitive-branch'
+                ? 'Still investigating without any action block.'
+                : truncatedProtocolResponse,
+            convertToCursorRequest: async () => ({ ...cursorReq, id: 'cognitive-branch' }),
+            recoverTruncatedToolResponse: async () => {
+                throw new Error('network down');
+            },
+        },
+    );
+
+    assert(resolved.toolCalls.length === 1, 'strict tool calls from the pre-recovery candidate should be preserved');
+    assert(resolved.toolCalls[0]?.name === 'Read', 'the preserved strict tool call should still be selected');
+    assert(resolved.stillTruncated, 'fallback candidate should preserve truncated state');
+    assert(!resolved.preserveOriginalTextWithoutToolCall, 'tool-bearing fallback should not switch into preserve-original text mode');
+});
+
+await test('resolveToolResponse preserves original text when both concurrent retries stay text-only', async () => {
+    const body = buildResolveToolBody();
+    const cursorReq = buildCursorRequest();
+    const initial = 'Investigating the repository now.';
+
+    const resolved = await resolveToolResponse(
+        cursorReq,
+        initial,
+        body,
+        undefined,
+        {
+            sendCursorRequestFull: async () => 'Still investigating without any action block.',
+            convertToCursorRequest: async () => ({ ...cursorReq, id: 'cognitive-branch' }),
+            recoverTruncatedToolResponse: async () => 'unused',
+        },
+    );
+
+    assert(resolved.toolCalls.length === 0, 'text-only concurrent retries should still produce no tool calls');
+    assert(resolved.preserveOriginalTextWithoutToolCall, 'preserve-original flag should be set when both retries stay text-only');
+    assert(resolved.fullText === initial, 'original text should be preserved as the chosen result');
+});
+
+await test('resolveToolResponse keeps forcing tool_choice=any when concurrent retries stay text-only', async () => {
+    const body = {
+        ...buildResolveToolBody(),
+        tool_choice: { type: 'any' },
+    };
+    const cursorReq = buildCursorRequest();
+    const initial = 'Still investigating without any action block.';
+    let sendCount = 0;
+
+    const resolved = await resolveToolResponse(
+        cursorReq,
+        initial,
+        body,
+        undefined,
+        {
+            sendCursorRequestFull: async () => {
+                sendCount++;
+                return 'Still investigating without any action block.';
+            },
+            convertToCursorRequest: async () => ({ ...cursorReq, id: 'cognitive-branch' }),
+            recoverTruncatedToolResponse: async () => 'unused',
+        },
+    );
+
+    assert(!resolved.preserveOriginalTextWithoutToolCall, 'tool_choice=any should not switch into preserve-original mode');
+    assert(sendCount === 4, `expected 4 retry sends (2 concurrent + 2 tool_choice retries), got ${sendCount}`);
 });
 
 await test('retry conversion sanitizes retry system prompt', async () => {

@@ -186,6 +186,69 @@ test('parseToolCalls normalizes common file argument aliases', () => {
     assertEqual(parsed.toolCalls[0]?.arguments.path, 'src/index.ts');
 });
 
+test('parseToolCalls normalizes question fields/select options into schema-compatible questions', () => {
+    const response = [
+        '```json action',
+        '{',
+        '  "tool": "question",',
+        '  "parameters": {',
+        '    "fields": [',
+        '      {',
+        '        "type": "select",',
+        '        "label": "What do you want to adjust?",',
+        '        "id": "adjustment",',
+        '        "multiple": false,',
+        '        "options": [',
+        '          "Reduce multipliers (Recommended)",',
+        '          "Increase char divisor"',
+        '        ]',
+        '      }',
+        '    ]',
+        '  }',
+        '}',
+        '```',
+    ].join('\n');
+
+    const parsed = parseToolCalls(response);
+    assertEqual(parsed.toolCalls.length, 1);
+    assertEqual(parsed.toolCalls[0]?.name, 'question');
+
+    const questions = parsed.toolCalls[0]?.arguments.questions;
+    assert(Array.isArray(questions) && questions.length === 1, 'question tool call should expose one normalized question item');
+    assertEqual(questions[0].question, 'What do you want to adjust?');
+    assertEqual(questions[0].header, 'What do you want to adjust?');
+    assert(Array.isArray(questions[0].options) && questions[0].options.length === 2, 'normalized question should preserve options');
+    assertEqual(questions[0].options[0].label, 'Reduce multipliers (Recommended)');
+    assertEqual(questions[0].options[0].description, 'Reduce multipliers (Recommended)');
+});
+
+test('parseToolCalls builds fallback question item from flattened parameters', () => {
+    const response = [
+        '```json action',
+        '{',
+        '  "tool": "question",',
+        '  "parameters": {',
+        '    "question": "Choose adjustment direction",',
+        '    "label": "Reduce multipliers",',
+        '    "value": "reduce_multipliers",',
+        '    "custom": true',
+        '  }',
+        '}',
+        '```',
+    ].join('\n');
+
+    const parsed = parseToolCalls(response);
+    assertEqual(parsed.toolCalls.length, 1);
+    assertEqual(parsed.toolCalls[0]?.name, 'question');
+
+    const questions = parsed.toolCalls[0]?.arguments.questions;
+    assert(Array.isArray(questions) && questions.length === 1, 'flattened parameters should still produce one question item');
+    assertEqual(questions[0].question, 'Choose adjustment direction');
+    assertEqual(questions[0].options[0].label, 'Reduce multipliers');
+    assertEqual(questions[0].options[0].description, 'Reduce multipliers');
+    assertEqual(questions[0].custom, true);
+});
+
 test('parseToolCalls recovers task action blocks with multiline prompt and inner code fences', () => {
     const response = [
         'Before',

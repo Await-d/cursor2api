@@ -137,18 +137,19 @@ const REFUSAL_PATTERNS = [
 const FIRST_TURN_PROMPT_LEAK_PATTERNS = [
     /Cursor(?:'s)?\s+(?:official\s+)?documentation\s+(?:assistant|system)/i,
     /documentation\s+assistant\s+for\s+Cursor/i,
+    /Cursor(?:'s)?\s+support\s+assistant/i,
+    /support\s+assistant\s+for\s+Cursor/i,
+    /I(?:'m|\s+am)\s+(?:a\s+)?Cursor(?:'s)?\s+support\s+assistant/i,
     /I\s+can\s+only\s+answer\s+questions\s+about\s+Cursor(?:'s)?\s+(?:official\s+)?documentation/i,
     /我是\s*Cursor\s*(?:官方|官方的)?\s*文档(?:助手|系统)/,
     /作为\s*Cursor\s*(?:官方|官方的)?\s*文档(?:助手|系统)/,
     /我只能回答.*Cursor\s*(?:官方|官方的)?\s*文档/,
     /帮助你解答\s*Cursor\s*(?:官方|官方的)?\s*文档/,
+    /我是\s*Cursor\s*的?\s*支持助手/,
 ];
 
-const FIRST_TURN_CURSOR_MENTION_PATTERN = /\bcursor(?:'s)?\b/i;
-
 function matchesFirstTurnPromptLeak(text: string): boolean {
-    return FIRST_TURN_PROMPT_LEAK_PATTERNS.some(pattern => pattern.test(text))
-        || FIRST_TURN_CURSOR_MENTION_PATTERN.test(text);
+    return FIRST_TURN_PROMPT_LEAK_PATTERNS.some(pattern => pattern.test(text));
 }
 
 export function isRefusal(text: string): boolean {
@@ -434,6 +435,13 @@ export function sanitizeResponse(text: string): string {
 }
 
 export function sanitizeResponseForRequest(text: string, body: AnthropicRequest): string {
+    if (isFirstAssistantTurnRequest(body.messages)) {
+        const candidate = stripThinkingForRefusalDetection(text, body).trim();
+        if (candidate && (isFirstTurnPromptLeak(candidate, body) || isLikelyRefusal(candidate))) {
+            return FIRST_TURN_NEUTRAL_RESPONSE;
+        }
+    }
+
     const sanitized = sanitizeResponse(text);
     if (sanitized === CLAUDE_IDENTITY_RESPONSE && isFirstAssistantTurnRequest(body.messages)) {
         return FIRST_TURN_NEUTRAL_RESPONSE;
@@ -611,6 +619,30 @@ function looksLikeCompletionSummaryText(text: string): boolean {
     return markerHits >= 1;
 }
 
+function looksLikeStatusSummaryText(text: string): boolean {
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.length > 8000) return false;
+
+    const directAction = /```json\s+action|"tool"\s*:/i;
+    if (directAction.test(trimmed)) return false;
+
+    const followupWork = /(let me (?:append|write|read|verify|check|fix|patch|inspect)|now appending|append(?:ing)? to the notepad|write to the notepad|i need to|now i need to|接下来|继续检查|继续修复|现在去|继续处理)/i;
+    if (followupWork.test(trimmed)) return false;
+
+    const markers = [
+        /当前状态总结|当前状态概览|状态总结|status\s+summary|current\s+status/i,
+        /已完成|已实现|已结束|completed|done\s*✅/i,
+        /尚未开始|未开始|待开始|remaining\s+(?:tasks|work|items|phases)|not\s+started/i,
+        /当前最高优先级|最高优先级|highest\s+priority|next\s+priority/i,
+        /phase\s*\d+|阶段\s*\d+/i,
+        /T-\d+/i,
+        /^\|.+\|$/m,
+    ];
+
+    const markerHits = markers.filter(pattern => pattern.test(trimmed)).length;
+    return markerHits >= 2;
+}
+
 export function shouldForceCompletionActionRetry(
     text: string,
     body?: Pick<AnthropicRequest, 'tools'>,
@@ -619,18 +651,27 @@ export function shouldForceCompletionActionRetry(
     return looksLikeCompletionSummaryText(text);
 }
 
-function isSafeCompletionSummaryWithoutToolCall(
+function requiresToolCall(body?: Pick<AnthropicRequest, 'tool_choice'>): boolean {
+    return body?.tool_choice?.type === 'any' || body?.tool_choice?.type === 'tool';
+}
+
+export function isSafeTextResponseWithoutToolCall(
     text: string,
-    body?: Pick<AnthropicRequest, 'messages' | 'tools'>,
+    body?: Pick<AnthropicRequest, 'messages' | 'tools' | 'tool_choice'>,
 ): boolean {
     const trimmed = text.trim();
     if (!trimmed) return false;
     if (/\bcursor\b/i.test(trimmed)) return false;
     if (isTruncated(trimmed)) return false;
-    if (!looksLikeCompletionSummaryText(trimmed)) return false;
+    if (requiresToolCall(body)) return false;
     if (isLikelyRefusal(trimmed)) return false;
     if (isFirstTurnPromptLeak(trimmed, body)) return false;
-    return true;
+    if (isLowValueToolPreamble(trimmed)) return false;
+    if (shouldForceToolActionRetry(trimmed, body)) return false;
+    if (shouldForceWaitingActionRetry(trimmed, body)) return false;
+    if (shouldForceDiagnosisActionRetry(trimmed, body)) return false;
+    if (shouldForceWriteLikeActionRetry(trimmed, body)) return false;
+    return looksLikeCompletionSummaryText(trimmed) || looksLikeStatusSummaryText(trimmed);
 }
 
 function looksLikeWaitingPlaceholderText(text: string): boolean {
@@ -779,12 +820,21 @@ export function getToolModeNoCallFallbackText(
     visibleText: string,
     stillTruncated: boolean,
     body?: AnthropicRequest,
+    preserveOriginalTextWithoutToolCall = false,
 ): string {
+    if (preserveOriginalTextWithoutToolCall && !requiresToolCall(body)) {
+        return body ? sanitizeResponseForRequest(fullText, body) : sanitizeResponse(fullText);
+    }
+
     if (stillTruncated) {
         return 'Let me proceed with the task.';
     }
 
-    if (isSafeCompletionSummaryWithoutToolCall(fullText, body)) {
+    if (requiresToolCall(body)) {
+        return 'Let me proceed with the task.';
+    }
+
+    if (isSafeTextResponseWithoutToolCall(fullText, body)) {
         return body ? sanitizeResponseForRequest(visibleText, body) : sanitizeResponse(visibleText);
     }
 
@@ -1231,11 +1281,53 @@ export function buildForcedToolActionRetryCursorRequest(
     };
 }
 
+type ToolResponseCandidateState = {
+    cursorReq: CursorChatRequest;
+    fullText: string;
+    parsed: ReturnType<typeof parseToolCalls>;
+    finalized: ReturnType<typeof finalizeToolResponseForClient>;
+    thinkingBlocks: ThinkingBlock[];
+}
+
+type ConcurrentRetryBranchResult = {
+    label: string;
+    ok: boolean;
+    candidate: ToolResponseCandidateState | null;
+    error?: string;
+}
+
+type ResolveToolResponseDeps = {
+    sendCursorRequestFull: typeof sendCursorRequestFull;
+    recoverTruncatedToolResponse: typeof recoverTruncatedToolResponse;
+    convertToCursorRequest: typeof convertToCursorRequest;
+}
+
+function shouldPropagateAbortInResolveToolResponse(error: unknown, signal?: AbortSignal): boolean {
+    return Boolean(signal?.aborted) || isAbortError(error) || (error instanceof Error && error.name === 'AbortError');
+}
+
+export function selectConcurrentRetryCandidate<T extends { finalized: { toolCalls: ParsedToolCall[] } }>(
+    original: T,
+    protocolCorrection: T | null,
+    cognitiveReframe: T | null,
+): T {
+    if (protocolCorrection && protocolCorrection.finalized.toolCalls.length > 0) {
+        return protocolCorrection;
+    }
+
+    if (cognitiveReframe && cognitiveReframe.finalized.toolCalls.length > 0) {
+        return cognitiveReframe;
+    }
+
+    return original;
+}
+
 export async function resolveToolResponse(
     cursorReq: CursorChatRequest,
     initialResponse?: string,
     body?: AnthropicRequest,
     signal?: AbortSignal,
+    deps: Partial<ResolveToolResponseDeps> = {},
 ): Promise<{
     fullText: string;
     toolCalls: ParsedToolCall[];
@@ -1243,41 +1335,121 @@ export async function resolveToolResponse(
     thinkingBlocks: ThinkingBlock[];
     stillTruncated: boolean;
     droppedRecoveredToolCalls: number;
+    preserveOriginalTextWithoutToolCall: boolean;
 }> {
+    const runtimeDeps: ResolveToolResponseDeps = {
+        sendCursorRequestFull,
+        recoverTruncatedToolResponse,
+        convertToCursorRequest,
+        ...deps,
+    };
+
     let activeCursorReq = cursorReq;
     let fullText = initialResponse ?? '';
     if (!initialResponse) {
-        fullText = await sendCursorRequestFull(activeCursorReq, signal);
+        fullText = await runtimeDeps.sendCursorRequestFull(activeCursorReq, signal);
     }
 
     const thinkingBlocks: ThinkingBlock[] = [];
     const thinkingEnabled = isThinkingEnabledForRequest(body);
-    const maybeExtractThinking = (text: string): string => {
+    const maybeExtractThinking = (text: string, targetBlocks: ThinkingBlock[] = thinkingBlocks): string => {
         if (!thinkingEnabled || !text.includes('<thinking>')) {
             return text;
         }
 
         const extracted = extractThinkingIfEnabled(text, true);
-        thinkingBlocks.push(...extracted.thinkingBlocks);
+        targetBlocks.push(...extracted.thinkingBlocks);
         return extracted.cleanText;
     };
 
-    fullText = maybeExtractThinking(fullText);
+    const adoptCandidate = (candidate: ToolResponseCandidateState) => {
+        activeCursorReq = candidate.cursorReq;
+        fullText = candidate.fullText;
+        parsed = candidate.parsed;
+        finalized = candidate.finalized;
+        thinkingBlocks.length = 0;
+        thinkingBlocks.push(...candidate.thinkingBlocks);
+    };
+
+    const resolveCandidateState = async (
+        candidateCursorReq: CursorChatRequest,
+        candidateText: string,
+        truncationLog?: string,
+    ): Promise<ToolResponseCandidateState> => {
+        const candidateThinkingBlocks: ThinkingBlock[] = [];
+        let candidateFullText = maybeExtractThinking(candidateText, candidateThinkingBlocks);
+        let candidateParsed = parseToolCalls(candidateFullText);
+        let candidateFinalized = finalizeToolResponseForClient(candidateFullText, candidateParsed);
+
+        if (isTruncated(candidateFullText)) {
+            const fallbackCandidate: ToolResponseCandidateState = {
+                cursorReq: candidateCursorReq,
+                fullText: candidateFullText,
+                parsed: candidateParsed,
+                finalized: candidateFinalized,
+                thinkingBlocks: [...candidateThinkingBlocks],
+            };
+
+            if (truncationLog) {
+                console.log(truncationLog);
+            }
+
+            try {
+                candidateFullText = maybeExtractThinking(
+                    await runtimeDeps.recoverTruncatedToolResponse(candidateCursorReq, candidateFullText, signal, candidateParsed.toolCalls.length > 0),
+                    candidateThinkingBlocks,
+                );
+                candidateParsed = parseToolCalls(candidateFullText);
+                candidateFinalized = finalizeToolResponseForClient(candidateFullText, candidateParsed);
+            } catch (error: unknown) {
+                if (shouldPropagateAbortInResolveToolResponse(error, signal)) {
+                    throw error;
+                }
+                console.warn(`[Handler] 截断恢复失败，保留恢复前候选结果: ${error instanceof Error ? error.message : String(error)}`);
+                return fallbackCandidate;
+            }
+        }
+
+        return {
+            cursorReq: candidateCursorReq,
+            fullText: candidateFullText,
+            parsed: candidateParsed,
+            finalized: candidateFinalized,
+            thinkingBlocks: candidateThinkingBlocks,
+        };
+    };
+
+    const resolveRetryBranch = async (
+        label: string,
+        buildCursorReq: () => Promise<CursorChatRequest>,
+        truncationLog?: string,
+    ): Promise<ConcurrentRetryBranchResult> => {
+        try {
+            const candidateCursorReq = await buildCursorReq();
+            const candidateText = await runtimeDeps.sendCursorRequestFull(candidateCursorReq, signal);
+            const candidate = await resolveCandidateState(candidateCursorReq, candidateText, truncationLog);
+            console.log(`[Handler] 并发重试分支 ${label} 完成: toolCalls=${candidate.finalized.toolCalls.length}, stillTruncated=${candidate.finalized.stillTruncated}`);
+            return { label, ok: true, candidate };
+        } catch (error: unknown) {
+            if (shouldPropagateAbortInResolveToolResponse(error, signal)) {
+                throw error;
+            }
+            const message = error instanceof Error ? error.message : String(error);
+            console.warn(`[Handler] 并发重试分支 ${label} 失败: ${message}`);
+            return { label, ok: false, candidate: null, error: message };
+        }
+    };
+
     let parsed = parseToolCalls(fullText);
     let finalized = finalizeToolResponseForClient(fullText, parsed);
-
-    if (isTruncated(fullText)) {
-        console.log('[Handler] 初始工具响应疑似截断，优先执行阶梯恢复');
-        fullText = maybeExtractThinking(await recoverTruncatedToolResponse(activeCursorReq, fullText, signal, parsed.toolCalls.length > 0));
-        parsed = parseToolCalls(fullText);
-        finalized = finalizeToolResponseForClient(fullText, parsed);
-    }
+    adoptCandidate(await resolveCandidateState(activeCursorReq, fullText, '[Handler] 初始工具响应疑似截断，优先执行阶梯恢复'));
 
     let acceptSafeCompletionSummary = false;
+    let preserveOriginalTextWithoutToolCall = false;
     let specializedNoToolRetry = 0
     while (finalized.toolCalls.length === 0 && body && specializedNoToolRetry < 1) {
-        if (isSafeCompletionSummaryWithoutToolCall(fullText, body)) {
-            console.log('[Handler] 检测到无泄漏完成态纯文本总结，直接接受本轮结果（跳过重试）');
+        if (isSafeTextResponseWithoutToolCall(fullText, body)) {
+            console.log('[Handler] 检测到安全的纯文本完成/状态总结，直接接受本轮结果（跳过重试）');
             acceptSafeCompletionSummary = true;
             break;
         }
@@ -1288,97 +1460,81 @@ export async function resolveToolResponse(
         specializedNoToolRetry++
         console.log(getSpecializedNoToolRetryLog(retryKind))
         activeCursorReq = buildCursorFollowupRequest(activeCursorReq, fullText, getSpecializedNoToolRetryPrompt(retryKind))
-        fullText = maybeExtractThinking(await sendCursorRequestFull(activeCursorReq, signal))
-        parsed = parseToolCalls(fullText)
-        finalized = finalizeToolResponseForClient(fullText, parsed)
-
-        if (isTruncated(fullText)) {
-            fullText = maybeExtractThinking(await recoverTruncatedToolResponse(activeCursorReq, fullText, signal, parsed.toolCalls.length > 0))
-            parsed = parseToolCalls(fullText)
-            finalized = finalizeToolResponseForClient(fullText, parsed)
-        }
-    }
-
-    if (finalized.toolCalls.length === 0 && !acceptSafeCompletionSummary) {
-        console.log('[Handler] 未得到可用工具调用，发送协议纠正提示重试...');
-        activeCursorReq = buildToolRetryCursorRequest(activeCursorReq);
-        fullText = maybeExtractThinking(await sendCursorRequestFull(activeCursorReq, signal));
-        parsed = parseToolCalls(fullText);
-        finalized = finalizeToolResponseForClient(fullText, parsed);
-
-        if (isTruncated(fullText)) {
-            console.log('[Handler] 协议纠正响应仍疑似截断，再次尝试阶梯恢复');
-            fullText = maybeExtractThinking(await recoverTruncatedToolResponse(activeCursorReq, fullText, signal, parsed.toolCalls.length > 0));
-            parsed = parseToolCalls(fullText);
-            finalized = finalizeToolResponseForClient(fullText, parsed);
-        }
+        adoptCandidate(await resolveCandidateState(activeCursorReq, await runtimeDeps.sendCursorRequestFull(activeCursorReq, signal)))
     }
 
     if (finalized.toolCalls.length === 0 && body && !acceptSafeCompletionSummary) {
-        console.log(`[Handler] 协议纠正后仍无工具调用（${isRefusal(fullText) ? '拒绝响应' : '纯文本'}），尝试认知重构重发...`);
-        activeCursorReq = await convertToCursorRequest(buildRetryRequest(body, 0));
-        fullText = maybeExtractThinking(await sendCursorRequestFull(activeCursorReq, signal));
-        parsed = parseToolCalls(fullText);
-        finalized = finalizeToolResponseForClient(fullText, parsed);
+        console.log('[Handler] 未得到可用工具调用，并发执行协议纠正与认知重构重试...');
+        const originalCandidate: ToolResponseCandidateState = {
+            cursorReq: activeCursorReq,
+            fullText,
+            parsed,
+            finalized,
+            thinkingBlocks: [...thinkingBlocks],
+        };
 
-        if (isTruncated(fullText)) {
-            console.log('[Handler] 认知重构响应仍疑似截断，最后再尝试一次阶梯恢复');
-            fullText = maybeExtractThinking(await recoverTruncatedToolResponse(activeCursorReq, fullText, signal, parsed.toolCalls.length > 0));
-            parsed = parseToolCalls(fullText);
-            finalized = finalizeToolResponseForClient(fullText, parsed);
+        const [protocolCorrectionBranch, cognitiveReframeBranch] = await Promise.all([
+            resolveRetryBranch(
+                'protocol-correction',
+                async () => buildToolRetryCursorRequest(activeCursorReq),
+                '[Handler] 协议纠正响应仍疑似截断，再次尝试阶梯恢复',
+            ),
+            resolveRetryBranch(
+                'cognitive-reframe',
+                async () => runtimeDeps.convertToCursorRequest(buildRetryRequest(body, 0)),
+                '[Handler] 认知重构响应仍疑似截断，最后再尝试一次阶梯恢复',
+            ),
+        ]);
+
+        const protocolCorrectionCandidate = protocolCorrectionBranch.candidate;
+        const cognitiveReframeCandidate = cognitiveReframeBranch.candidate;
+
+        const chosenCandidate = selectConcurrentRetryCandidate(
+            originalCandidate,
+            protocolCorrectionCandidate,
+            cognitiveReframeCandidate,
+        );
+
+        if (chosenCandidate === originalCandidate) {
+            console.log('[Handler] 并发重试未产生可用工具调用，保留首次原始响应内容');
+            preserveOriginalTextWithoutToolCall = !requiresToolCall(body);
+        } else if (chosenCandidate === protocolCorrectionCandidate && (cognitiveReframeCandidate?.finalized.toolCalls.length ?? 0) > 0) {
+            console.log('[Handler] 两个并发重试都产生工具调用，按顺序优先采用协议纠正结果');
+        } else if (chosenCandidate === protocolCorrectionCandidate) {
+            console.log('[Handler] 协议纠正重试产生工具调用，采用该结果');
+        } else {
+            console.log('[Handler] 认知重构重试产生工具调用，采用该结果');
         }
+
+        adoptCandidate(chosenCandidate);
     }
 
     let forcedActionRetry = 0;
-    while (finalized.toolCalls.length === 0 && !acceptSafeCompletionSummary && shouldForceToolActionRetry(fullText, body) && forcedActionRetry < 2) {
+    while (finalized.toolCalls.length === 0 && !acceptSafeCompletionSummary && !preserveOriginalTextWithoutToolCall && shouldForceToolActionRetry(fullText, body) && forcedActionRetry < 2) {
         forcedActionRetry++;
         console.log(`[Handler] 工具模式下拒绝/泄漏且无工具调用（第${forcedActionRetry}次），强制 action 重试...`);
         activeCursorReq = buildForcedToolActionRetryCursorRequest(activeCursorReq, fullText, body);
-        fullText = maybeExtractThinking(await sendCursorRequestFull(activeCursorReq, signal));
-        parsed = parseToolCalls(fullText);
-        finalized = finalizeToolResponseForClient(fullText, parsed);
-
-        if (isTruncated(fullText)) {
-            fullText = maybeExtractThinking(await recoverTruncatedToolResponse(activeCursorReq, fullText, signal, parsed.toolCalls.length > 0));
-            parsed = parseToolCalls(fullText);
-            finalized = finalizeToolResponseForClient(fullText, parsed);
-        }
+        adoptCandidate(await resolveCandidateState(activeCursorReq, await runtimeDeps.sendCursorRequestFull(activeCursorReq, signal)));
     }
 
     let toolChoiceRetry = 0;
-    while (body?.tool_choice?.type === 'any' && finalized.toolCalls.length === 0 && !acceptSafeCompletionSummary && toolChoiceRetry < 2) {
+    while (body?.tool_choice?.type === 'any' && finalized.toolCalls.length === 0 && !acceptSafeCompletionSummary && !preserveOriginalTextWithoutToolCall && toolChoiceRetry < 2) {
         toolChoiceRetry++;
         console.log(`[Handler] tool_choice=any 但模型未调用工具（第${toolChoiceRetry}次），强制重试...`);
         activeCursorReq = buildToolChoiceAnyRetryCursorRequest(activeCursorReq, fullText);
-        fullText = maybeExtractThinking(await sendCursorRequestFull(activeCursorReq, signal));
-        parsed = parseToolCalls(fullText);
-        finalized = finalizeToolResponseForClient(fullText, parsed);
-
-        if (isTruncated(fullText)) {
-            fullText = maybeExtractThinking(await recoverTruncatedToolResponse(activeCursorReq, fullText, signal, parsed.toolCalls.length > 0));
-            parsed = parseToolCalls(fullText);
-            finalized = finalizeToolResponseForClient(fullText, parsed);
-        }
+        adoptCandidate(await resolveCandidateState(activeCursorReq, await runtimeDeps.sendCursorRequestFull(activeCursorReq, signal)));
     }
 
-    if (body?.tool_choice?.type === 'any' && finalized.toolCalls.length === 0 && !acceptSafeCompletionSummary && toolChoiceRetry > 0) {
+    if (body?.tool_choice?.type === 'any' && finalized.toolCalls.length === 0 && !acceptSafeCompletionSummary && !preserveOriginalTextWithoutToolCall && toolChoiceRetry > 0) {
         console.log('[Handler] tool_choice=any 重试后仍无工具调用');
     }
 
     let truncatedNoCallRetry = 0;
-    while (finalized.toolCalls.length === 0 && !acceptSafeCompletionSummary && finalized.stillTruncated && truncatedNoCallRetry < 1) {
+    while (finalized.toolCalls.length === 0 && !acceptSafeCompletionSummary && !preserveOriginalTextWithoutToolCall && finalized.stillTruncated && truncatedNoCallRetry < 1) {
         truncatedNoCallRetry++;
         console.log('[Handler] 工具输出截断且未恢复出完整工具调用，尝试重新完整输出...');
         activeCursorReq = buildCursorFollowupRequest(activeCursorReq, fullText, TOOL_TRUNCATED_RECOVERY_PROMPT);
-        fullText = maybeExtractThinking(await sendCursorRequestFull(activeCursorReq, signal));
-        parsed = parseToolCalls(fullText);
-        finalized = finalizeToolResponseForClient(fullText, parsed);
-
-        if (isTruncated(fullText)) {
-            fullText = maybeExtractThinking(await recoverTruncatedToolResponse(activeCursorReq, fullText, signal, parsed.toolCalls.length > 0));
-            parsed = parseToolCalls(fullText);
-            finalized = finalizeToolResponseForClient(fullText, parsed);
-        }
+        adoptCandidate(await resolveCandidateState(activeCursorReq, await runtimeDeps.sendCursorRequestFull(activeCursorReq, signal)));
     }
 
     let actionOnlyRetry = 0;
@@ -1389,22 +1545,18 @@ export async function resolveToolResponse(
         const previousFullText = fullText;
         const previousParsed = parsed;
         const previousFinalized = finalized;
+        const previousThinkingBlocks = [...thinkingBlocks];
         activeCursorReq = buildCursorFollowupRequest(activeCursorReq, fullText, TOOL_COMPLETE_OUTPUT_RETRY_PROMPT);
-        fullText = maybeExtractThinking(await sendCursorRequestFull(activeCursorReq, signal));
-        parsed = parseToolCalls(fullText);
-        finalized = finalizeToolResponseForClient(fullText, parsed);
-
-        if (isTruncated(fullText)) {
-            fullText = maybeExtractThinking(await recoverTruncatedToolResponse(activeCursorReq, fullText, signal, parsed.toolCalls.length > 0));
-            parsed = parseToolCalls(fullText);
-            finalized = finalizeToolResponseForClient(fullText, parsed);
-        }
+        const nextCandidate = await resolveCandidateState(activeCursorReq, await runtimeDeps.sendCursorRequestFull(activeCursorReq, signal));
+        adoptCandidate(nextCandidate);
 
         if (shouldKeepPreviousToolResolution(previousFinalized, finalized)) {
             console.log('[Handler] 完整重试结果更差，保留上一版更完整的工具调用');
             fullText = previousFullText;
             parsed = previousParsed;
             finalized = previousFinalized;
+            thinkingBlocks.length = 0;
+            thinkingBlocks.push(...previousThinkingBlocks);
             break;
         }
     }
@@ -1415,22 +1567,18 @@ export async function resolveToolResponse(
         const previousFullText = fullText;
         const previousParsed = parsed;
         const previousFinalized = finalized;
+        const previousThinkingBlocks = [...thinkingBlocks];
         activeCursorReq = buildCursorFollowupRequest(activeCursorReq, fullText, TOOL_ACTION_ONLY_RETRY_PROMPT);
-        fullText = maybeExtractThinking(await sendCursorRequestFull(activeCursorReq, signal));
-        parsed = parseToolCalls(fullText);
-        finalized = finalizeToolResponseForClient(fullText, parsed);
-
-        if (isTruncated(fullText)) {
-            fullText = maybeExtractThinking(await recoverTruncatedToolResponse(activeCursorReq, fullText, signal, parsed.toolCalls.length > 0));
-            parsed = parseToolCalls(fullText);
-            finalized = finalizeToolResponseForClient(fullText, parsed);
-        }
+        const nextCandidate = await resolveCandidateState(activeCursorReq, await runtimeDeps.sendCursorRequestFull(activeCursorReq, signal));
+        adoptCandidate(nextCandidate);
 
         if (shouldKeepPreviousToolResolution(previousFinalized, finalized)) {
             console.log('[Handler] action-only 重试结果更差，保留上一版更完整的工具调用');
             fullText = previousFullText;
             parsed = previousParsed;
             finalized = previousFinalized;
+            thinkingBlocks.length = 0;
+            thinkingBlocks.push(...previousThinkingBlocks);
             break;
         }
     }
@@ -1451,6 +1599,7 @@ export async function resolveToolResponse(
         thinkingBlocks,
         stillTruncated: finalized.stillTruncated,
         droppedRecoveredToolCalls: finalized.droppedRecoveredToolCalls,
+        preserveOriginalTextWithoutToolCall,
     };
 }
 
@@ -1495,6 +1644,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         thinkingBlocks: ThinkingBlock[];
         stillTruncated: boolean;
         droppedRecoveredToolCalls: number;
+        preserveOriginalTextWithoutToolCall: boolean;
     } | null = null;
 
     // 无工具模式：先缓冲全部响应再检测拒绝，如果是拒绝则重试
@@ -1550,8 +1700,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
                     fullResponse = CLAUDE_IDENTITY_RESPONSE;
                 }
             } else {
-                console.log(`[Handler] 工具模式下首轮泄漏/拒绝且无工具调用，返回简短引导文本`);
-                fullResponse = 'Let me proceed with the task.';
+                console.log('[Handler] 工具模式下首轮泄漏/拒绝且无工具调用，保留原始响应交给后续 tool resolver 强制动作');
             }
         }
 
@@ -1611,7 +1760,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
                 stopReason = getAnthropicToolStopReason({ toolCalls, stillTruncated });
 
                 // Check if the residual text is a known refusal, if so, drop it completely!
-                if (REFUSAL_PATTERNS.some(p => p.test(cleanText))) {
+                if (isRefusal(cleanText) || isFirstTurnPromptLeak(cleanText, body)) {
                     console.log(`[Handler] Supressed refusal text generated during tool usage: ${cleanText.substring(0, 100)}...`);
                     cleanText = '';
                 }
@@ -1679,7 +1828,13 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
                 estimatedOutputTokens = estimateAnthropicOutputTokens(usageBlocks);
             } else {
                 stopReason = getAnthropicToolStopReason({ toolCalls, stillTruncated });
-                const textToSend = getToolModeNoCallFallbackText(fullResponse, stillTruncated ? cleanText : fullResponse, stillTruncated, body);
+                const textToSend = getToolModeNoCallFallbackText(
+                    fullResponse,
+                    stillTruncated ? cleanText : fullResponse,
+                    stillTruncated,
+                    body,
+                    resolvedToolResponse!.preserveOriginalTextWithoutToolCall,
+                );
 
                 if (textToSend === 'Let me proceed with the task.') {
                     console.log(`[Handler] Tool-enabled response without complete tool call — using minimal fallback: ${fullResponse.substring(0, 100)}...`);
@@ -1803,8 +1958,7 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
         if (shouldRetry()) {
             const leakedFirstTurn = isFirstTurnPromptLeak(stripThinkingForRefusalDetection(fullText, body), body);
             if (hasTools) {
-                console.log(`[Handler] 非流式：工具模式下首轮泄漏/拒绝，引导模型输出`);
-                fullText = 'I understand the request. Let me analyze the information and proceed with the appropriate action.';
+                console.log('[Handler] 非流式：工具模式下首轮泄漏/拒绝，保留原始响应交给后续 tool resolver 强制动作');
             } else if (leakedFirstTurn) {
                 console.log('[Handler] 非流式：首轮提示词泄漏重试后仍存在，返回中性首轮回复');
                 fullText = FIRST_TURN_NEUTRAL_RESPONSE;
@@ -1838,7 +1992,7 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
         if (toolCalls.length > 0) {
             stopReason = getAnthropicToolStopReason(resolved);
 
-            if (isRefusal(cleanText)) {
+            if (isRefusal(cleanText) || isFirstTurnPromptLeak(cleanText, body)) {
                 console.log(`[Handler] Supressed refusal text generated during non-stream tool usage: ${cleanText.substring(0, 100)}...`);
                 cleanText = '';
             }
@@ -1859,7 +2013,13 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
             }
         } else {
             stopReason = getAnthropicToolStopReason(resolved);
-            const textToSend = getToolModeNoCallFallbackText(fullText, resolved.stillTruncated ? cleanText : fullText, resolved.stillTruncated, body);
+            const textToSend = getToolModeNoCallFallbackText(
+                fullText,
+                resolved.stillTruncated ? cleanText : fullText,
+                resolved.stillTruncated,
+                body,
+                resolved.preserveOriginalTextWithoutToolCall,
+            );
             if (textToSend === 'Let me proceed with the task.') {
                 console.log(`[Handler] Tool-enabled non-stream response without complete tool call — using minimal fallback: ${fullText.substring(0, 100)}...`);
             }

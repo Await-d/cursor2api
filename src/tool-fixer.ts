@@ -54,6 +54,193 @@ export function normalizeToolArguments(args: Record<string, unknown>): Record<st
     return normalized;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function asNonEmptyString(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+
+type NormalizedQuestionOption = {
+    label: string;
+    description: string;
+};
+
+type NormalizedQuestionItem = {
+    question: string;
+    header: string;
+    options: NormalizedQuestionOption[];
+    multiple?: boolean;
+    custom?: boolean;
+};
+
+function normalizeQuestionOption(option: unknown): NormalizedQuestionOption | null {
+    if (typeof option === 'string') {
+        const label = asNonEmptyString(option);
+        if (!label) return null;
+        return { label, description: label };
+    }
+
+    if (!isRecord(option)) return null;
+
+    const label = asNonEmptyString(option.label)
+        ?? asNonEmptyString(option.value)
+        ?? asNonEmptyString(option.text)
+        ?? asNonEmptyString(option.name);
+    if (!label) return null;
+
+    const description = asNonEmptyString(option.description)
+        ?? asNonEmptyString(option.desc)
+        ?? label;
+
+    return { label, description };
+}
+
+function normalizeQuestionOptions(rawOptions: unknown): NormalizedQuestionOption[] {
+    if (Array.isArray(rawOptions)) {
+        return rawOptions
+            .map(option => normalizeQuestionOption(option))
+            .filter((option): option is NormalizedQuestionOption => option !== null);
+    }
+
+    if (isRecord(rawOptions)) {
+        const directOption = normalizeQuestionOption(rawOptions);
+        if (directOption) return [directOption];
+
+        const options: NormalizedQuestionOption[] = [];
+        for (const [key, value] of Object.entries(rawOptions)) {
+            if (typeof value === 'string') {
+                const label = asNonEmptyString(value) ?? asNonEmptyString(key);
+                if (!label) continue;
+                options.push({ label, description: label });
+                continue;
+            }
+
+            if (isRecord(value)) {
+                const normalized = normalizeQuestionOption(value)
+                    ?? (() => {
+                        const fallback = asNonEmptyString(key);
+                        if (!fallback) return null;
+                        return { label: fallback, description: fallback };
+                    })();
+                if (normalized) options.push(normalized);
+            }
+        }
+
+        return options;
+    }
+
+    return [];
+}
+
+function normalizeQuestionItems(rawItems: unknown[]): NormalizedQuestionItem[] {
+    const items: NormalizedQuestionItem[] = [];
+
+    for (const rawItem of rawItems) {
+        if (!isRecord(rawItem)) continue;
+
+        const question = asNonEmptyString(rawItem.question)
+            ?? asNonEmptyString(rawItem.label)
+            ?? asNonEmptyString(rawItem.title)
+            ?? asNonEmptyString(rawItem.name)
+            ?? asNonEmptyString(rawItem.header);
+        const header = asNonEmptyString(rawItem.header) ?? question;
+
+        let options = normalizeQuestionOptions(rawItem.options);
+        if (options.length === 0) {
+            const singleOptionLabel = asNonEmptyString(rawItem.value)
+                ?? asNonEmptyString(rawItem.option)
+                ?? asNonEmptyString(rawItem.label);
+            if (singleOptionLabel) {
+                const description = asNonEmptyString(rawItem.description) ?? singleOptionLabel;
+                options = [{ label: singleOptionLabel, description }];
+            }
+        }
+
+        if (!question || !header || options.length === 0) continue;
+
+        const normalizedItem: NormalizedQuestionItem = {
+            question,
+            header,
+            options,
+        };
+
+        if (typeof rawItem.multiple === 'boolean') {
+            normalizedItem.multiple = rawItem.multiple;
+        }
+        if (typeof rawItem.custom === 'boolean') {
+            normalizedItem.custom = rawItem.custom;
+        }
+
+        items.push(normalizedItem);
+    }
+
+    return items;
+}
+
+function normalizeQuestionArguments(toolName: string, args: Record<string, unknown>): Record<string, unknown> {
+    const normalizedToolName = (toolName || '').trim().toLowerCase();
+    if (normalizedToolName !== 'question') return args;
+    if (!args || typeof args !== 'object') return args;
+
+    const normalized: Record<string, unknown> = { ...args };
+
+    const rawItems = Array.isArray(normalized.questions)
+        ? normalized.questions
+        : Array.isArray(normalized.fields)
+            ? normalized.fields
+            : isRecord(normalized.questions)
+                ? [normalized.questions]
+                : isRecord(normalized.fields)
+                    ? [normalized.fields]
+                    : [];
+
+    let normalizedItems = normalizeQuestionItems(rawItems);
+
+    if (normalizedItems.length === 0) {
+        const fallbackQuestion = asNonEmptyString(normalized.question)
+            ?? asNonEmptyString(normalized.header)
+            ?? asNonEmptyString(normalized.label);
+        const fallbackHeader = asNonEmptyString(normalized.header) ?? fallbackQuestion;
+
+        let fallbackOptions = normalizeQuestionOptions(normalized.options);
+        if (fallbackOptions.length === 0) {
+            const fallbackLabel = asNonEmptyString(normalized.label)
+                ?? asNonEmptyString(normalized.value)
+                ?? asNonEmptyString(normalized.option);
+            if (fallbackLabel) {
+                fallbackOptions = [{ label: fallbackLabel, description: fallbackLabel }];
+            }
+        }
+
+        if (fallbackQuestion && fallbackHeader && fallbackOptions.length > 0) {
+            const fallbackItem: NormalizedQuestionItem = {
+                question: fallbackQuestion,
+                header: fallbackHeader,
+                options: fallbackOptions,
+            };
+
+            if (typeof normalized.multiple === 'boolean') {
+                fallbackItem.multiple = normalized.multiple;
+            }
+            if (typeof normalized.custom === 'boolean') {
+                fallbackItem.custom = normalized.custom;
+            }
+
+            normalizedItems = [fallbackItem];
+        }
+    }
+
+    if (normalizedItems.length > 0) {
+        normalized.questions = normalizedItems;
+    }
+
+    return normalized;
+}
+
 /**
  * 将智能引号（中文引号等）替换为普通 ASCII 引号
  */
@@ -169,6 +356,7 @@ export function fixToolCallArguments(
     args: Record<string, unknown>,
 ): Record<string, unknown> {
     args = normalizeToolArguments(args);
+    args = normalizeQuestionArguments(toolName, args);
     args = repairExactMatchToolArguments(toolName, args);
     args = repairBashCommandArguments(toolName, args);
     return args;

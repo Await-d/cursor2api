@@ -25,11 +25,11 @@ function isNonWesternChar(char: string): boolean {
 }
 
 function getAdjustedTokenCount(baseTokens: number): number {
-    if (baseTokens < 100) return baseTokens * 1.5;
-    if (baseTokens < 200) return baseTokens * 1.3;
-    if (baseTokens < 300) return baseTokens * 1.25;
-    if (baseTokens < 800) return baseTokens * 1.2;
-    return baseTokens;
+    if (baseTokens < 100) return baseTokens * 1.35;
+    if (baseTokens < 200) return baseTokens * 1.17;
+    if (baseTokens < 300) return baseTokens * 1.125;
+    if (baseTokens < 800) return baseTokens * 1.08;
+    return baseTokens * 0.9;
 }
 
 function extractSystemTexts(system?: AnthropicRequest['system'], includeInjectedPrompt = true): string[] {
