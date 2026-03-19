@@ -44,6 +44,7 @@ import {
     getOpenAIToolFinishReason,
     getToolModeNoCallFallbackText,
     resolveToolResponse,
+    sanitizeResponseFragmentForRequest,
     isTruncated,
 } from './handler.js';
 
@@ -658,6 +659,7 @@ async function handleOpenAIStream(
 
                 // 发送工具调用前的残余文本（清洗后）
                 let cleanOutput = (isRefusal(cleanText) || isFirstTurnPromptLeak(cleanText, anthropicReq)) ? '' : cleanText;
+                cleanOutput = sanitizeResponseFragmentForRequest(cleanOutput, anthropicReq);
                 cleanOutput = normalizeOpenAIOutputText(cleanOutput, body.response_format, anthropicReq);
                 completionContent = cleanOutput;
                 if (cleanOutput) {
@@ -886,6 +888,7 @@ async function handleOpenAINonStream(
                 console.log(`[OpenAI] 抑制工具模式下的拒绝文本: ${cleanText.substring(0, 100)}...`);
                 cleanText = '';
             }
+            cleanText = sanitizeResponseFragmentForRequest(cleanText, anthropicReq);
             content = normalizeOpenAIOutputText(cleanText, body.response_format, anthropicReq) || null;
 
             toolCalls = parsed.toolCalls.map(tc => ({

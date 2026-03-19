@@ -1,4 +1,5 @@
 import { handleOpenAIChatCompletions } from '../src/openai-handler.ts';
+import { FIRST_TURN_NEUTRAL_RESPONSE } from '../src/handler.ts';
 
 let passed = 0;
 let failed = 0;
@@ -138,6 +139,58 @@ await test('non-stream OpenAI handler keeps minimal fallback when tool_choice is
     assert(res.statusCode === 200, `unexpected status: ${res.statusCode}`);
     assert(res.jsonPayload?.choices?.[0]?.message?.content === 'Let me proceed with the task.', 'required tool_choice should not accept text-only summary fallback');
     assert(res.jsonPayload?.choices?.[0]?.finish_reason === 'stop', 'no-tool fallback should still report stop');
+});
+
+await test('non-stream OpenAI handler strips unexpected Cursor mention when user did not mention Cursor', async () => {
+    const req = createMockReq(buildOpenAIToolBody('auto'));
+    const res = createMockRes();
+    const cursorReq = buildCursorReq();
+
+    await handleOpenAIChatCompletions(req, res, {
+        createAbortSignal: () => new AbortController().signal,
+        convertToCursorRequest: async () => cursorReq,
+        sendCursorRequestFull: async () => 'Initial raw text',
+        sendCursorRequest: async () => {},
+        resolveToolResponse: async () => ({
+            fullText: 'If you need help with something in the Cursor editor, I am happy to assist.',
+            toolCalls: [],
+            cleanText: 'If you need help with something in the Cursor editor, I am happy to assist.',
+            thinkingBlocks: [],
+            stillTruncated: false,
+            droppedRecoveredToolCalls: 0,
+            preserveOriginalTextWithoutToolCall: true,
+        }),
+    });
+
+    const content = res.jsonPayload?.choices?.[0]?.message?.content || '';
+    assert(!/\bcursor\b/i.test(content), 'OpenAI runtime should not emit Cursor when the user never mentioned it');
+    assert(content === FIRST_TURN_NEUTRAL_RESPONSE, 'unexpected Cursor mention should fall back to the neutral visible response');
+});
+
+await test('non-stream OpenAI handler also strips unexpected lowercase cursor mention', async () => {
+    const req = createMockReq(buildOpenAIToolBody('auto'));
+    const res = createMockRes();
+    const cursorReq = buildCursorReq();
+
+    await handleOpenAIChatCompletions(req, res, {
+        createAbortSignal: () => new AbortController().signal,
+        convertToCursorRequest: async () => cursorReq,
+        sendCursorRequestFull: async () => 'Initial raw text',
+        sendCursorRequest: async () => {},
+        resolveToolResponse: async () => ({
+            fullText: 'If you need help with something in the cursor editor, I am happy to assist.',
+            toolCalls: [],
+            cleanText: 'If you need help with something in the cursor editor, I am happy to assist.',
+            thinkingBlocks: [],
+            stillTruncated: false,
+            droppedRecoveredToolCalls: 0,
+            preserveOriginalTextWithoutToolCall: true,
+        }),
+    });
+
+    const content = res.jsonPayload?.choices?.[0]?.message?.content || '';
+    assert(!/\bcursor\b/i.test(content), 'OpenAI runtime should not emit lowercase cursor either when the user never mentioned it');
+    assert(content === FIRST_TURN_NEUTRAL_RESPONSE, 'unexpected lowercase cursor mention should also fall back to the neutral visible response');
 });
 
 console.log(`\n结果: ${passed} 通过 / ${failed} 失败 / ${passed + failed} 总计`);
