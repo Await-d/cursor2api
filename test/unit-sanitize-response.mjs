@@ -127,16 +127,15 @@ test('first-turn support-assistant text is directly intercepted to neutral respo
     assertEqual(result, FIRST_TURN_NEUTRAL_RESPONSE);
 });
 
-test('first-turn generic Cursor mention is not treated as leak', () => {
+test('first-turn generic Cursor mention is stripped when user did not mention Cursor', () => {
     const body = {
         model: 'claude-sonnet-4-6',
         max_tokens: 1024,
         messages: [{ role: 'user', content: 'hello' }],
     };
-    assert(
-        !isFirstTurnPromptLeak('I can help with Cursor IDE features right now.', body),
-        'generic first-turn Cursor mention should stay allowed',
-    );
+    const result = sanitizeResponseForRequest('I can help with Cursor IDE features right now.', body);
+    assert(!/\bcursor\b/i.test(result), 'generic first-turn Cursor mention should not survive when the user did not mention Cursor');
+    assertEqual(result, FIRST_TURN_NEUTRAL_RESPONSE, 'unexpected Cursor mention should fall back to the neutral first-turn response');
 });
 
 test('first-turn leak is detected even when placed mid-response', () => {
@@ -174,6 +173,51 @@ test('non-first-turn generic Cursor mention does not trigger first-turn leak', (
         ],
     };
     assert(!isFirstTurnPromptLeak('I can help with Cursor IDE features.', body), '非首轮不应因 Cursor 普通提及触发首轮泄漏判定');
+});
+
+test('non-first-turn generic Cursor mention is stripped when user never mentioned Cursor', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [
+            { role: 'user', content: 'hello' },
+            { role: 'assistant', content: 'hi' },
+            { role: 'user', content: 'continue' },
+        ],
+    };
+    const result = sanitizeResponseForRequest('Use Cursor to open settings and continue.', body);
+    assert(!/\bcursor\b/i.test(result), 'later-turn replies should still suppress Cursor when the user never mentioned it');
+});
+
+test('lowercase cursor mention is stripped when user never mentioned cursor', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'hello' }],
+    };
+    const result = sanitizeResponseForRequest('If you need help in the cursor editor, I can assist.', body);
+    assert(!/\bcursor\b/i.test(result), 'lowercase cursor mention should also be suppressed when the user did not mention cursor');
+    assertEqual(result, FIRST_TURN_NEUTRAL_RESPONSE, 'lowercase cursor leakage should also fall back to the neutral first-turn response');
+});
+
+test('Cursor mention is preserved when the user explicitly mentions Cursor', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'How do I configure Cursor settings?' }],
+    };
+    const result = sanitizeResponseForRequest('In Cursor settings, open Preferences and search for rules.', body);
+    assert(/\bcursor\b/i.test(result), 'Cursor mention should remain allowed when the user explicitly asked about Cursor');
+});
+
+test('lowercase cursor mention is preserved when the user explicitly mentions cursor', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'how do I configure cursor settings?' }],
+    };
+    const result = sanitizeResponseForRequest('In cursor settings, open Preferences and search for rules.', body);
+    assert(/\bcursor\b/i.test(result), 'lowercase cursor mention should remain allowed when the user explicitly asked about cursor');
 });
 
 test('sanitizeResponse 会清理 Cursor 官方文档助手表述', () => {

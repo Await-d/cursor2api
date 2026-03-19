@@ -15,7 +15,7 @@ import type {
     CursorSSEEvent,
     ParsedToolCall,
 } from './types.js';
-import { convertToCursorRequest, parseToolCalls, hasToolCalls, isToolCallComplete, isFirstAssistantTurnRequest } from './converter.js';
+import { convertToCursorRequest, parseToolCalls, hasToolCalls, isToolCallComplete, isFirstAssistantTurnRequest, requestMentionsCursor } from './converter.js';
 import { sendCursorRequest, sendCursorRequestFull, isAbortError } from './cursor-client.js';
 import { getConfig } from './config.js';
 import { estimateAnthropicInputTokens, estimateAnthropicOutputTokens, estimateCursorInputTokens } from './token-estimator.js';
@@ -296,6 +296,54 @@ I don't have information about the specific model version or ID being used for t
 
 export const FIRST_TURN_NEUTRAL_RESPONSE = 'I can help with that. Please share the specific task or details you want me to focus on.';
 
+const CURSOR_WORD_PATTERN = /\bcursor(?:'s)?\b/i;
+
+function shouldSuppressCursorMentionForRequest(body?: Pick<AnthropicRequest, 'messages'>): boolean {
+    return Boolean(body) && !requestMentionsCursor(body?.messages);
+}
+
+function stripUnexpectedCursorMentions(text: string): string {
+    if (!text) return text;
+
+    let result = text;
+    result = result.replace(/(^|[.!?。！？]\s*)[^\n.!?。！？]*\bcursor(?:'s)?\b[^\n.!?。！？]*(?=[.!?。！？]|$)/gi, '$1');
+    result = result.split('\n').filter(line => !CURSOR_WORD_PATTERN.test(line)).join('\n');
+    result = result.replace(/^[\s.,;:!?。！？、；：-]+|[\s.,;:!?。！？、；：-]+$/g, '');
+    if (/^[\s.,;:!?。！？、；：-]*$/.test(result)) {
+        return '';
+    }
+    return result.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function sanitizeResponseForRequestInternal(
+    text: string,
+    body: AnthropicRequest,
+    emptyFallback: string,
+): string {
+    if (isFirstAssistantTurnRequest(body.messages)) {
+        const candidate = stripThinkingForRefusalDetection(text, body).trim();
+        if (candidate && (isFirstTurnPromptLeak(candidate, body) || isLikelyRefusal(candidate))) {
+            return FIRST_TURN_NEUTRAL_RESPONSE;
+        }
+    }
+
+    const sanitized = sanitizeResponse(text);
+    if (sanitized === CLAUDE_IDENTITY_RESPONSE && isFirstAssistantTurnRequest(body.messages)) {
+        return FIRST_TURN_NEUTRAL_RESPONSE;
+    }
+
+    if (!shouldSuppressCursorMentionForRequest(body) || !CURSOR_WORD_PATTERN.test(sanitized)) {
+        return sanitized;
+    }
+
+    const stripped = stripUnexpectedCursorMentions(sanitized);
+    if (stripped && !CURSOR_WORD_PATTERN.test(stripped)) {
+        return stripped;
+    }
+
+    return emptyFallback;
+}
+
 // 工具能力询问的模拟回复（当用户问“你有哪些工具”时，返回 Claude 真实能力描述）
 export const CLAUDE_TOOLS_RESPONSE = `作为 Claude，我的核心能力包括：
 
@@ -435,18 +483,11 @@ export function sanitizeResponse(text: string): string {
 }
 
 export function sanitizeResponseForRequest(text: string, body: AnthropicRequest): string {
-    if (isFirstAssistantTurnRequest(body.messages)) {
-        const candidate = stripThinkingForRefusalDetection(text, body).trim();
-        if (candidate && (isFirstTurnPromptLeak(candidate, body) || isLikelyRefusal(candidate))) {
-            return FIRST_TURN_NEUTRAL_RESPONSE;
-        }
-    }
+    return sanitizeResponseForRequestInternal(text, body, FIRST_TURN_NEUTRAL_RESPONSE);
+}
 
-    const sanitized = sanitizeResponse(text);
-    if (sanitized === CLAUDE_IDENTITY_RESPONSE && isFirstAssistantTurnRequest(body.messages)) {
-        return FIRST_TURN_NEUTRAL_RESPONSE;
-    }
-    return sanitized;
+export function sanitizeResponseFragmentForRequest(text: string, body: AnthropicRequest): string {
+    return sanitizeResponseForRequestInternal(text, body, '');
 }
 
 // ==================== Messages API ====================
@@ -1765,7 +1806,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
                     cleanText = '';
                 }
 
-                cleanText = sanitizeResponseForRequest(cleanText, body);
+                cleanText = sanitizeResponseFragmentForRequest(cleanText, body);
 
                 // Any clean text is sent as a single block before the tool blocks
                 const unsentCleanText = cleanText.substring(sentText.length).trim();
@@ -1997,7 +2038,7 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
                 cleanText = '';
             }
 
-            cleanText = sanitizeResponseForRequest(cleanText, body);
+            cleanText = sanitizeResponseFragmentForRequest(cleanText, body);
 
             if (cleanText) {
                 contentBlocks.push({ type: 'text', text: cleanText });
