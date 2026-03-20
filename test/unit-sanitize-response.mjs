@@ -115,6 +115,18 @@ test('non-first-turn prompt injection fallback remains identity response', () =>
     assertEqual(result, CLAUDE_IDENTITY_RESPONSE);
 });
 
+test('first-turn Cursor 文档无关拒绝文本会回退为中性响应', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'hello' }],
+    };
+    const result = sanitizeResponseForRequest('这是一个代码项目问题，与 Cursor 文档无关。继续分析。', body);
+    assertEqual(result, FIRST_TURN_NEUTRAL_RESPONSE);
+    const variantResult = sanitizeResponseForRequest('这是一个代码项目问题，与 Cursor 文档不相关。继续分析。', body);
+    assertEqual(variantResult, FIRST_TURN_NEUTRAL_RESPONSE);
+});
+
 test('first-turn Cursor 官方文档泄漏会被识别为重试条件', () => {
     const body = {
         model: 'claude-sonnet-4-6',
@@ -363,6 +375,28 @@ test('tool-enabled Chinese documentation/system-context fallback triggers forced
     assert(
         shouldForceToolActionRetry(text, body),
         'Chinese documentation/system-context fallback should force action retry',
+    );
+});
+
+test('tool-enabled Cursor 文档无关拒绝文本 triggers forced action retry', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        tools: [{ name: 'Read', description: 'Read a file', input_schema: { type: 'object', properties: {} } }],
+        messages: [
+            { role: 'user', content: 'hello' },
+            { role: 'assistant', content: 'hi' },
+            { role: 'user', content: 'continue' },
+        ],
+    };
+    const text = '这是一个代码项目问题，与 Cursor 文档无关。继续分析。';
+    assert(
+        shouldForceToolActionRetry(text, body),
+        'Cursor docs-unrelated refusal text should force action retry in tool mode',
+    );
+    assert(
+        shouldForceToolActionRetry('这是一个代码项目问题，与 Cursor 文档不相关。继续分析。', body),
+        'Cursor docs-not-related refusal text should force action retry in tool mode',
     );
 });
 

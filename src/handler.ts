@@ -7,16 +7,18 @@
 
 import type { Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import { buildUsageCostLog, extractCursorUsageFromEvent, preferCursorUsage, toAnthropicStreamStartUsage, toAnthropicUsage } from './cursor-usage.js';
 import type {
     AnthropicRequest,
     AnthropicResponse,
     AnthropicContentBlock,
     CursorChatRequest,
     CursorSSEEvent,
+    CursorUsage,
     ParsedToolCall,
 } from './types.js';
 import { convertToCursorRequest, parseToolCalls, hasToolCalls, isToolCallComplete, isFirstAssistantTurnRequest, requestMentionsCursor } from './converter.js';
-import { sendCursorRequest, sendCursorRequestFull, isAbortError } from './cursor-client.js';
+import { sendCursorRequest, sendCursorRequestFull, sendCursorRequestFullWithUsage, isAbortError } from './cursor-client.js';
 import { getConfig } from './config.js';
 import { estimateAnthropicInputTokens, estimateAnthropicOutputTokens, estimateCursorInputTokens } from './token-estimator.js';
 import { extractThinkingIfEnabled, isAnthropicThinkingEnabled, type ThinkingBlock } from './thinking.js';
@@ -74,6 +76,7 @@ const REFUSAL_PATTERNS = [
     /help\s+with\s+(?:coding|programming)\s+and\s+Cursor/i,
     /Cursor\s+IDE\s+(?:questions|features|related)/i,
     /unrelated\s+to\s+(?:programming|coding)(?:\s+or\s+Cursor)?/i,
+    /unrelated\s+to\s+Cursor(?:'s)?\s+(?:official\s+)?documentation/i,
     /Cursor[- ]related\s+question/i,
     /(?:ask|please\s+ask)\s+a\s+(?:programming|coding|Cursor)/i,
     /(?:I'?m|I\s+am)\s+here\s+to\s+help\s+with\s+(?:coding|programming)/i,
@@ -131,6 +134,7 @@ const REFUSAL_PATTERNS = [
     /故障排除/,
     // Chinese topic refusal
     /与\s*(?:编程|代码|开发)\s*无关/,
+    /与\s*Cursor\s*(?:官方|官方的)?\s*文档\s*(?:无关|不相关)/i,
     /请提问.*(?:编程|代码|开发|技术).*问题/,
     /只能帮助.*(?:编程|代码|开发)/,
     /我(?:需|需要)\s*(?:先)?(?:查阅|阅读|查看).{0,12}(?:文档|资料|相关信息).{0,12}(?:以便|来|才能)?(?:更好(?:地)?|更准确(?:地)?)?(?:帮助|协助)你/,
@@ -1753,17 +1757,6 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
     const id = msgId();
     const model = cursorReq.model;
     const hasTools = (body.tools?.length ?? 0) > 0;
-    const estimatedInputTokens = estimateCursorInputTokens(cursorReq);
-
-    // 发送 message_start
-    writeSSE(res, 'message_start', {
-        type: 'message_start',
-        message: {
-            id, type: 'message', role: 'assistant', content: [],
-            model, stop_reason: null, stop_sequence: null,
-            usage: { input_tokens: estimatedInputTokens, output_tokens: 0 },
-        },
-    });
 
     const keepaliveInterval = setInterval(() => {
         writeSSE(res, 'ping', { type: 'ping' });
@@ -1786,10 +1779,14 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
     // 无工具模式：先缓冲全部响应再检测拒绝，如果是拒绝则重试
     let activeCursorReq = cursorReq;
     let retryCount = 0;
+    let resolvedUsage: CursorUsage | undefined;
 
     const executeStream = async () => {
         fullResponse = '';
+        resolvedUsage = undefined;
         await sendCursorRequest(activeCursorReq, (event: CursorSSEEvent) => {
+            const nextUsage = extractCursorUsageFromEvent(event);
+            resolvedUsage = preferCursorUsage(resolvedUsage, nextUsage);
             if (event.type !== 'text-delta' || !event.delta) return;
             fullResponse += event.delta;
 
@@ -1866,6 +1863,22 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 
         let stopReason: AnthropicResponse['stop_reason'] = isTruncated(fullResponse) ? 'max_tokens' : 'end_turn';
         let estimatedOutputTokens = 1;
+        const estimatedInputTokens = estimateCursorInputTokens(activeCursorReq);
+
+        writeSSE(res, 'message_start', {
+            type: 'message_start',
+            message: {
+                id,
+                type: 'message',
+                role: 'assistant',
+                content: [],
+                model,
+                stop_reason: null,
+                stop_sequence: null,
+                usage: toAnthropicStreamStartUsage(resolvedUsage, estimatedInputTokens),
+                ...(resolvedUsage ? { cursor_usage: resolvedUsage } : {}),
+            },
+        });
 
         if (hasTools) {
             let { toolCalls, cleanText, thinkingBlocks: resolvedThinkingBlocks, stillTruncated } = resolvedToolResponse!;
@@ -2043,10 +2056,31 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         }
 
         // 发送 message_delta + message_stop
+        const finalUsage = resolvedUsage
+            ? {
+                output_tokens: resolvedUsage.outputTokens,
+                ...(typeof resolvedUsage.cachedInputTokens === 'number'
+                    ? { cache_read_input_tokens: resolvedUsage.cachedInputTokens }
+                    : {}),
+            }
+            : { output_tokens: estimatedOutputTokens };
+        const usageForLog: CursorUsage = resolvedUsage ?? {
+            inputTokens: estimatedInputTokens,
+            outputTokens: estimatedOutputTokens,
+            totalTokens: estimatedInputTokens + estimatedOutputTokens,
+            isReal: false,
+        };
+        console.log(buildUsageCostLog('Handler', {
+            model: activeCursorReq.model,
+            source: resolvedUsage ? 'cursor' : 'estimated',
+            stream: true,
+            usage: usageForLog,
+        }));
         writeSSE(res, 'message_delta', {
             type: 'message_delta',
             delta: { stop_reason: stopReason, stop_sequence: null },
-            usage: { output_tokens: estimatedOutputTokens },
+            usage: finalUsage,
+            ...(resolvedUsage ? { cursor_usage: resolvedUsage } : {}),
         });
 
         writeSSE(res, 'message_stop', { type: 'message_stop' });
@@ -2070,7 +2104,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 
 async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body: AnthropicRequest, signal: AbortSignal): Promise<void> {
     let activeCursorReq = cursorReq;
-    let fullText = await sendCursorRequestFull(activeCursorReq, signal);
+    let { fullText, usage: resolvedUsage } = await sendCursorRequestFullWithUsage(activeCursorReq, signal);
     const hasTools = (body.tools?.length ?? 0) > 0;
 
     console.log(`[Handler] 非流式原始响应 (${fullText.length} chars, tools=${hasTools}): ${fullText.substring(0, 300)}${fullText.length > 300 ? '...' : ''}`);
@@ -2088,7 +2122,7 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
             const retryBody = buildRetryRequest(body, attempt);
             const retryCursorReq = await convertToCursorRequest(retryBody);
             activeCursorReq = retryCursorReq;
-            fullText = await sendCursorRequestFull(retryCursorReq, signal);
+            ({ fullText, usage: resolvedUsage } = await sendCursorRequestFullWithUsage(retryCursorReq, signal));
             if (!shouldRetry()) break;
         }
         if (shouldRetry()) {
@@ -2171,6 +2205,19 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
     }
 
     const estimatedInputTokens = estimateCursorInputTokens(activeCursorReq);
+    const estimatedOutputTokens = estimateAnthropicOutputTokens(contentBlocks);
+    const usageForLog: CursorUsage = resolvedUsage ?? {
+        inputTokens: estimatedInputTokens,
+        outputTokens: estimatedOutputTokens,
+        totalTokens: estimatedInputTokens + estimatedOutputTokens,
+        isReal: false,
+    };
+    console.log(buildUsageCostLog('Handler', {
+        model: activeCursorReq.model,
+        source: resolvedUsage ? 'cursor' : 'estimated',
+        stream: false,
+        usage: usageForLog,
+    }));
     const response: AnthropicResponse = {
         id: msgId(),
         type: 'message',
@@ -2179,10 +2226,11 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
         model: cursorReq.model,
         stop_reason: stopReason,
         stop_sequence: null,
-        usage: {
+        usage: toAnthropicUsage(resolvedUsage, {
             input_tokens: estimatedInputTokens,
-            output_tokens: estimateAnthropicOutputTokens(contentBlocks),
-        },
+            output_tokens: estimatedOutputTokens,
+        }),
+        ...(resolvedUsage ? { cursor_usage: resolvedUsage } : {}),
     };
 
     res.json(response);
@@ -2192,6 +2240,6 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
 
 function writeSSE(res: Response, event: string, data: unknown): void {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    // @ts-expect-error flush exists on ServerResponse when compression is used
-    if (typeof res.flush === 'function') res.flush();
+    const responseWithFlush = res as Response & { flush?: () => void };
+    if (typeof responseWithFlush.flush === 'function') responseWithFlush.flush();
 }

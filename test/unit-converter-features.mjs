@@ -451,6 +451,14 @@ await test('isRefusal recognizes documentation and system-context disclaimer fal
         isRefusal('上面显示的工具输出来自不同的系统上下文。'),
         'missing Chinese system-context disclaimer',
     );
+    assert(
+        isRefusal('这是一个代码项目问题，与 Cursor 文档无关。继续分析。'),
+        'missing Chinese Cursor docs-unrelated disclaimer',
+    );
+    assert(
+        isRefusal('这是一个代码项目问题，与 Cursor 文档不相关。继续分析。'),
+        'missing Chinese Cursor docs-not-related disclaimer',
+    );
 });
 
 await test('isRefusal recognizes Cursor help-center menu fallback text', async () => {
