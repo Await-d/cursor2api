@@ -1,7 +1,8 @@
 import * as https from 'https';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { HttpsProxyAgent } from 'https-proxy-agent';
-import type { CursorChatRequest, CursorSSEEvent } from './types.js';
+import { extractCursorUsageFromEvent, preferCursorUsage } from './cursor-usage.js';
+import type { CursorChatRequest, CursorSSEEvent, CursorUsage } from './types.js';
 import { getConfig } from './config.js';
 import { getQueue, RequestQueue, RequestAbortedError } from './queue.js';
 import { logRequestCompletion } from './request-logging.js';
@@ -803,15 +804,16 @@ export async function sendCursorRequestFullWithUsage(
     signal?: AbortSignal,
 ): Promise<{
     fullText: string;
-    usage?: CursorSSEEvent['usage'];
+    usage?: CursorUsage;
 }> {
     let fullText = '';
-    let usage: CursorSSEEvent['usage'] | undefined;
+    let usage: CursorUsage | undefined;
     await sendCursorRequest(req, (event) => {
         if (event.type === 'text-delta' && event.delta) {
             fullText += event.delta;
         }
-        if (event.usage) usage = event.usage;
+        const resolvedUsage = extractCursorUsageFromEvent(event);
+        usage = preferCursorUsage(usage, resolvedUsage);
     }, signal);
     return { fullText, usage };
 }
