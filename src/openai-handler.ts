@@ -7,6 +7,7 @@
 
 import type { Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import { buildUsageCostLog, extractCursorUsageFromEvent, preferCursorUsage, toOpenAIUsage } from './cursor-usage.js';
 import type {
     OpenAIChatRequest,
     OpenAIMessage,
@@ -23,9 +24,10 @@ import type {
     AnthropicTool,
     CursorChatRequest,
     CursorSSEEvent,
+    CursorUsage,
 } from './types.js';
 import { convertToCursorRequest, hasToolCalls, isFirstAssistantTurnRequest } from './converter.js';
-import { sendCursorRequest, sendCursorRequestFull, isAbortError } from './cursor-client.js';
+import { sendCursorRequest, sendCursorRequestFull, sendCursorRequestFullWithUsage, isAbortError } from './cursor-client.js';
 import { getConfig } from './config.js';
 import { estimateCursorInputTokens, estimateOpenAICompletionTokens } from './token-estimator.js';
 import { extractThinkingIfEnabled, isAnthropicThinkingEnabled } from './thinking.js';
@@ -223,6 +225,7 @@ function createAbortSignal(req: Request, res: Response): AbortSignal {
 type OpenAIHandlerDeps = {
     convertToCursorRequest: typeof convertToCursorRequest;
     sendCursorRequestFull: typeof sendCursorRequestFull;
+    sendCursorRequestFullWithUsage: typeof sendCursorRequestFullWithUsage;
     sendCursorRequest: typeof sendCursorRequest;
     resolveToolResponse: typeof resolveToolResponse;
     createAbortSignal: (req: Request, res: Response) => AbortSignal;
@@ -443,6 +446,7 @@ export async function handleOpenAIChatCompletions(req: Request, res: Response, d
     const runtimeDeps: OpenAIHandlerDeps = {
         convertToCursorRequest,
         sendCursorRequestFull,
+        sendCursorRequestFullWithUsage,
         sendCursorRequest,
         resolveToolResponse,
         createAbortSignal,
@@ -580,11 +584,15 @@ async function handleOpenAIStream(
     let fullResponse = '';
     let activeCursorReq = cursorReq;
     let retryCount = 0;
+    let resolvedUsage: CursorUsage | undefined;
 
     // 统一缓冲模式：先缓冲全部响应，再检测拒绝和处理
     const executeStream = async () => {
         fullResponse = '';
+        resolvedUsage = undefined;
         await deps.sendCursorRequest(activeCursorReq, (event: CursorSSEEvent) => {
+            const nextUsage = extractCursorUsageFromEvent(event);
+            resolvedUsage = preferCursorUsage(resolvedUsage, nextUsage);
             if (event.type !== 'text-delta' || !event.delta) return;
             fullResponse += event.delta;
         }, signal);
@@ -794,14 +802,28 @@ async function handleOpenAIStream(
             completionToolCalls,
             completionReasoningContent || null,
         ));
+        const finalUsage = toOpenAIUsage(resolvedUsage, {
+            prompt_tokens: promptTokens,
+            completion_tokens: completionTokens,
+            total_tokens: promptTokens + completionTokens,
+        });
+        const usageForLog: CursorUsage = resolvedUsage ?? {
+            inputTokens: promptTokens,
+            outputTokens: completionTokens,
+            totalTokens: promptTokens + completionTokens,
+            isReal: false,
+        };
+        console.log(buildUsageCostLog('OpenAI', {
+            model: activeCursorReq.model,
+            source: resolvedUsage ? 'cursor' : 'estimated',
+            stream: true,
+            usage: usageForLog,
+        }));
         writeOpenAISSE(res, {
             id, object: 'chat.completion.chunk', created, model,
             choices: [],
-            usage: {
-                prompt_tokens: promptTokens,
-                completion_tokens: completionTokens,
-                total_tokens: promptTokens + completionTokens,
-            },
+            usage: finalUsage,
+            ...(resolvedUsage ? { cursor_usage: resolvedUsage } : {}),
         });
 
         res.write('data: [DONE]\n\n');
@@ -836,7 +858,7 @@ async function handleOpenAINonStream(
     deps: OpenAIHandlerDeps,
 ): Promise<void> {
     let activeCursorReq = cursorReq;
-    let fullText = await deps.sendCursorRequestFull(activeCursorReq, signal);
+    let { fullText, usage: resolvedUsage } = await deps.sendCursorRequestFullWithUsage(activeCursorReq, signal);
     const hasTools = (body.tools?.length ?? 0) > 0;
     const thinkingEnabled = isAnthropicThinkingEnabled(anthropicReq.thinking, getConfig().enableThinking);
 
@@ -855,7 +877,7 @@ async function handleOpenAINonStream(
             const retryBody = buildRetryRequest(anthropicReq, attempt);
             const retryCursorReq = await deps.convertToCursorRequest(retryBody);
             activeCursorReq = retryCursorReq;
-            fullText = await deps.sendCursorRequestFull(retryCursorReq, signal);
+            ({ fullText, usage: resolvedUsage } = await deps.sendCursorRequestFullWithUsage(retryCursorReq, signal));
             if (!shouldRetry()) break;
         }
         if (shouldRetry()) {
@@ -937,6 +959,23 @@ async function handleOpenAINonStream(
 
     const promptTokens = estimateCursorInputTokens(activeCursorReq);
     const completionTokens = Math.max(1, estimateOpenAICompletionTokens(content, toolCalls, reasoningContent || null));
+    const finalUsage = toOpenAIUsage(resolvedUsage, {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: promptTokens + completionTokens,
+    });
+    const usageForLog: CursorUsage = resolvedUsage ?? {
+        inputTokens: promptTokens,
+        outputTokens: completionTokens,
+        totalTokens: promptTokens + completionTokens,
+        isReal: false,
+    };
+    console.log(buildUsageCostLog('OpenAI', {
+        model: activeCursorReq.model,
+        source: resolvedUsage ? 'cursor' : 'estimated',
+        stream: false,
+        usage: usageForLog,
+    }));
 
     const response: OpenAIChatCompletion = {
         id: chatId(),
@@ -953,11 +992,8 @@ async function handleOpenAINonStream(
             },
             finish_reason: finishReason,
         }],
-        usage: {
-            prompt_tokens: promptTokens,
-            completion_tokens: completionTokens,
-            total_tokens: promptTokens + completionTokens,
-        },
+        usage: finalUsage,
+        ...(resolvedUsage ? { cursor_usage: resolvedUsage } : {}),
     };
 
     res.json(response);

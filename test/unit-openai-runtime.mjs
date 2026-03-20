@@ -87,6 +87,17 @@ function buildOpenAIToolBody(toolChoice = 'auto') {
     };
 }
 
+function parseOpenAIChunks(chunks) {
+    return chunks
+        .flatMap(chunk => String(chunk).split('\n\n'))
+        .map(part => part.trim())
+        .filter(Boolean)
+        .filter(part => part.startsWith('data: '))
+        .map(part => part.slice(6))
+        .filter(part => part !== '[DONE]')
+        .map(part => JSON.parse(part));
+}
+
 console.log('\n📦 openai runtime\n');
 
 await test('non-stream OpenAI handler preserves original text when resolver marks preserve-original', async () => {
@@ -98,6 +109,7 @@ await test('non-stream OpenAI handler preserves original text when resolver mark
         createAbortSignal: () => new AbortController().signal,
         convertToCursorRequest: async () => cursorReq,
         sendCursorRequestFull: async () => 'Initial raw text',
+        sendCursorRequestFullWithUsage: async () => ({ fullText: 'Initial raw text', usage: undefined }),
         sendCursorRequest: async () => {},
         resolveToolResponse: async () => ({
             fullText: 'Original plain-text status update.',
@@ -124,6 +136,7 @@ await test('non-stream OpenAI handler keeps minimal fallback when tool_choice is
         createAbortSignal: () => new AbortController().signal,
         convertToCursorRequest: async () => cursorReq,
         sendCursorRequestFull: async () => 'Initial raw text',
+        sendCursorRequestFullWithUsage: async () => ({ fullText: 'Initial raw text', usage: undefined }),
         sendCursorRequest: async () => {},
         resolveToolResponse: async () => ({
             fullText: '**当前状态总结：**\n- 已完成：Phase 1',
@@ -150,6 +163,7 @@ await test('non-stream OpenAI handler strips unexpected Cursor mention when user
         createAbortSignal: () => new AbortController().signal,
         convertToCursorRequest: async () => cursorReq,
         sendCursorRequestFull: async () => 'Initial raw text',
+        sendCursorRequestFullWithUsage: async () => ({ fullText: 'Initial raw text', usage: undefined }),
         sendCursorRequest: async () => {},
         resolveToolResponse: async () => ({
             fullText: 'If you need help with something in the Cursor editor, I am happy to assist.',
@@ -176,6 +190,7 @@ await test('non-stream OpenAI handler also strips unexpected lowercase cursor me
         createAbortSignal: () => new AbortController().signal,
         convertToCursorRequest: async () => cursorReq,
         sendCursorRequestFull: async () => 'Initial raw text',
+        sendCursorRequestFullWithUsage: async () => ({ fullText: 'Initial raw text', usage: undefined }),
         sendCursorRequest: async () => {},
         resolveToolResponse: async () => ({
             fullText: 'If you need help with something in the cursor editor, I am happy to assist.',
@@ -207,9 +222,10 @@ await test('non-stream OpenAI handler immediately retries documentation/system-c
     await handleOpenAIChatCompletions(req, res, {
         createAbortSignal: () => new AbortController().signal,
         convertToCursorRequest: async () => cursorReq,
-        sendCursorRequestFull: async () => {
+        sendCursorRequestFull: async () => rawFallback,
+        sendCursorRequestFullWithUsage: async () => {
             callCount++;
-            return rawFallback;
+            return { fullText: rawFallback, usage: undefined };
         },
         sendCursorRequest: async () => {},
     });
@@ -243,9 +259,10 @@ await test('non-stream OpenAI handler immediately retries Cursor help-center men
     await handleOpenAIChatCompletions(req, res, {
         createAbortSignal: () => new AbortController().signal,
         convertToCursorRequest: async () => cursorReq,
-        sendCursorRequestFull: async () => {
+        sendCursorRequestFull: async () => rawFallback,
+        sendCursorRequestFullWithUsage: async () => {
             callCount++;
-            return rawFallback;
+            return { fullText: rawFallback, usage: undefined };
         },
         sendCursorRequest: async () => {},
     });
@@ -256,6 +273,125 @@ await test('non-stream OpenAI handler immediately retries Cursor help-center men
         res.jsonPayload?.choices?.[0]?.message?.content === FIRST_TURN_NEUTRAL_RESPONSE,
         'OpenAI runtime should fall back to the first-turn neutral response after exhausting Cursor help-menu retries',
     );
+});
+
+await test('non-stream OpenAI handler prefers real Cursor usage metadata over estimators', async () => {
+    const req = createMockReq({
+        model: 'gpt-5',
+        stream: false,
+        messages: [{ role: 'user', content: 'Continue the task directly.' }],
+    });
+    const res = createMockRes();
+    const cursorReq = buildCursorReq();
+    const resolvedUsage = {
+        inputTokens: 31981,
+        outputTokens: 795,
+        totalTokens: 32776,
+        reasoningTokens: 549,
+        cachedInputTokens: 12267,
+        inputTokenDetails: { noCacheTokens: 19714, cacheReadTokens: 12267 },
+        outputTokenDetails: { textTokens: 246, reasoningTokens: 549 },
+        isReal: true,
+    };
+    const originalLog = console.log;
+    const logs = [];
+    console.log = (...args) => {
+        logs.push(args.join(' '));
+    };
+
+    try {
+        await handleOpenAIChatCompletions(req, res, {
+            createAbortSignal: () => new AbortController().signal,
+            convertToCursorRequest: async () => cursorReq,
+            sendCursorRequestFull: async () => 'Visible answer',
+            sendCursorRequestFullWithUsage: async () => ({ fullText: 'Visible answer', usage: resolvedUsage }),
+            sendCursorRequest: async () => {},
+        });
+    } finally {
+        console.log = originalLog;
+    }
+
+    assert(res.jsonPayload?.usage?.prompt_tokens === 31981, 'should use real prompt tokens');
+    assert(res.jsonPayload?.usage?.completion_tokens === 795, 'should use real completion tokens');
+    assert(res.jsonPayload?.usage?.total_tokens === 32776, 'should use real total tokens');
+    assert(res.jsonPayload?.usage?.prompt_tokens_details?.cached_tokens === 12267, 'should expose cached prompt token details');
+    assert(res.jsonPayload?.usage?.completion_tokens_details?.reasoning_tokens === 549, 'should expose reasoning token details');
+    assert(res.jsonPayload?.cursor_usage?.isReal === true, 'should preserve resolved Cursor usage metadata');
+    assert(logs.some(line => line.includes('返回 usage/cost:') && line.includes('source=cursor') && line.includes('estimated_cost_usd=')), 'should log returned real usage cost');
+});
+
+await test('stream OpenAI handler emits real Cursor usage chunk when metadata usage is present', async () => {
+    const req = createMockReq({
+        model: 'gpt-5',
+        stream: true,
+        messages: [{ role: 'user', content: 'Continue the task directly.' }],
+    });
+    const res = createMockRes();
+    const cursorReq = buildCursorReq();
+
+    await handleOpenAIChatCompletions(req, res, {
+        createAbortSignal: () => new AbortController().signal,
+        convertToCursorRequest: async () => cursorReq,
+        sendCursorRequestFull: async () => 'Visible answer',
+        sendCursorRequestFullWithUsage: async () => ({ fullText: 'Visible answer', usage: undefined }),
+        sendCursorRequest: async (_req, onChunk) => {
+            onChunk({ type: 'text-delta', delta: 'Visible answer' });
+            onChunk({
+                role: 'assistant',
+                metadata: {
+                    usage: {
+                        inputTokens: 100,
+                        outputTokens: 20,
+                        totalTokens: 120,
+                        reasoningTokens: 12,
+                        cachedInputTokens: 40,
+                        inputTokenDetails: { noCacheTokens: 60, cacheReadTokens: 40 },
+                        outputTokenDetails: { textTokens: 8, reasoningTokens: 12 },
+                    },
+                },
+            });
+            onChunk({
+                type: 'message_stop',
+                usage: {
+                    prompt_tokens: 100,
+                    completion_tokens: 20,
+                    total_tokens: 120,
+                },
+            });
+        },
+    });
+
+    const payloads = parseOpenAIChunks(res.chunks);
+    const usageChunk = payloads.find(payload => payload.usage);
+    assert(usageChunk, 'expected a final usage chunk');
+    assert(usageChunk.usage.prompt_tokens === 100, 'stream chunk should use real prompt tokens');
+    assert(usageChunk.usage.completion_tokens === 20, 'stream chunk should use real completion tokens');
+    assert(usageChunk.usage.total_tokens === 120, 'stream chunk should use real total tokens');
+    assert(usageChunk.usage.prompt_tokens_details?.cached_tokens === 40, 'stream chunk should include cached prompt token details');
+    assert(usageChunk.usage.completion_tokens_details?.reasoning_tokens === 12, 'stream chunk should include reasoning token details');
+    assert(usageChunk.cursor_usage?.isReal === true, 'stream chunk should preserve Cursor usage metadata');
+});
+
+await test('non-stream OpenAI handler falls back to estimated usage when real usage is absent', async () => {
+    const req = createMockReq({
+        model: 'gpt-5',
+        stream: false,
+        messages: [{ role: 'user', content: 'Continue the task directly.' }],
+    });
+    const res = createMockRes();
+    const cursorReq = buildCursorReq();
+
+    await handleOpenAIChatCompletions(req, res, {
+        createAbortSignal: () => new AbortController().signal,
+        convertToCursorRequest: async () => cursorReq,
+        sendCursorRequestFull: async () => 'Visible answer',
+        sendCursorRequestFullWithUsage: async () => ({ fullText: 'Visible answer', usage: undefined }),
+        sendCursorRequest: async () => {},
+    });
+
+    assert(typeof res.jsonPayload?.usage?.prompt_tokens === 'number', 'fallback should still return prompt tokens');
+    assert(typeof res.jsonPayload?.usage?.completion_tokens === 'number', 'fallback should still return completion tokens');
+    assert(!res.jsonPayload?.cursor_usage, 'fallback path should not attach cursor_usage metadata');
 });
 
 console.log(`\n结果: ${passed} 通过 / ${failed} 失败 / ${passed + failed} 总计`);
