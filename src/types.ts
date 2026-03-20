@@ -70,7 +70,12 @@ export interface AnthropicResponse {
     model: string;
     stop_reason: string;
     stop_sequence: string | null;
-    usage: { input_tokens: number; output_tokens: number };
+    usage: {
+        input_tokens: number;
+        output_tokens: number;
+        cache_read_input_tokens?: number;
+    };
+    cursor_usage?: CursorUsage;
 }
 
 // ==================== Cursor API Types ====================
@@ -93,22 +98,64 @@ export interface CursorMessage {
     parts: CursorPart[];
     id: string;
     role: string;
+    metadata?: CursorAssistantMetadata;
 }
 
 export interface CursorPart {
     type: string;
-    text: string;
+    text?: string;
+}
+
+export interface CursorTokenDetails {
+    noCacheTokens?: number;
+    cacheReadTokens?: number;
+    textTokens?: number;
+    reasoningTokens?: number;
+}
+
+export interface CursorEventUsage {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+}
+
+export interface CursorMetadataUsage {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    reasoningTokens?: number;
+    cachedInputTokens?: number;
+    inputTokenDetails?: CursorTokenDetails;
+    outputTokenDetails?: CursorTokenDetails;
+}
+
+export interface CursorAssistantMetadata {
+    usage?: CursorMetadataUsage;
+}
+
+export interface CursorUsage {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    reasoningTokens?: number;
+    cachedInputTokens?: number;
+    inputTokenDetails?: CursorTokenDetails;
+    outputTokenDetails?: CursorTokenDetails;
+    isReal: boolean;
 }
 
 export interface CursorSSEEvent {
-    type: string;
+    type?: string;
     delta?: string;
     /** upstream usage chunk (some OpenAI-compatible services) */
-    usage?: {
-        prompt_tokens?: number;
-        completion_tokens?: number;
-        total_tokens?: number;
+    usage?: CursorEventUsage;
+    metadata?: CursorAssistantMetadata;
+    assistant?: {
+        metadata?: CursorAssistantMetadata;
     };
+    id?: string;
+    role?: string;
+    parts?: CursorPart[];
 }
 
 // ==================== Internal Types ====================

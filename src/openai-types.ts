@@ -62,6 +62,8 @@ export interface OpenAIToolCall {
     };
 }
 
+import type { CursorUsage } from './types.js';
+
 // ==================== OpenAI Response Types ====================
 
 export interface OpenAIChatCompletion {
@@ -74,7 +76,16 @@ export interface OpenAIChatCompletion {
         prompt_tokens: number;
         completion_tokens: number;
         total_tokens: number;
+        prompt_tokens_details?: {
+            cached_tokens?: number;
+            uncached_tokens?: number;
+        };
+        completion_tokens_details?: {
+            reasoning_tokens?: number;
+            text_tokens?: number;
+        };
     };
+    cursor_usage?: CursorUsage;
 }
 
 export interface OpenAIChatChoice {
@@ -96,7 +107,20 @@ export interface OpenAIChatCompletionChunk {
     created: number;
     model: string;
     choices: OpenAIStreamChoice[];
-    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+    usage?: {
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+        prompt_tokens_details?: {
+            cached_tokens?: number;
+            uncached_tokens?: number;
+        };
+        completion_tokens_details?: {
+            reasoning_tokens?: number;
+            text_tokens?: number;
+        };
+    };
+    cursor_usage?: CursorUsage;
 }
 
 export interface OpenAIStreamChoice {
