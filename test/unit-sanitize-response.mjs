@@ -158,6 +158,24 @@ test('first-turn support-assistant text is directly intercepted to neutral respo
     assertEqual(result, FIRST_TURN_NEUTRAL_RESPONSE);
 });
 
+test('first-turn Cursor help-center menu text is directly intercepted to neutral response', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'hello' }],
+    };
+    const text = [
+        'If you have a question about Cursor (the AI code editor), I\'m happy to help. For example:',
+        '- How to use Cursor\'s AI features',
+        '- Billing or account questions',
+        '- Setting up rules or context',
+        '- Troubleshooting Cursor behavior',
+        'What can I help you with?',
+    ].join('\n');
+    const result = sanitizeResponseForRequest(text, body);
+    assertEqual(result, FIRST_TURN_NEUTRAL_RESPONSE);
+});
+
 test('first-turn generic Cursor mention is stripped when user did not mention Cursor', () => {
     const body = {
         model: 'claude-sonnet-4-6',
@@ -284,6 +302,67 @@ test('tool-enabled refusal with no tool calls triggers forced action retry', () 
     assert(
         shouldForceToolActionRetry('I\'m your Cursor support assistant and cannot modify files on your system.', body),
         'tool-enabled refusal should force action retry even after first turn',
+    );
+});
+
+test('tool-enabled English documentation/system-context fallback triggers forced action retry', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        tools: [{ name: 'Read', description: 'Read a file', input_schema: { type: 'object', properties: {} } }],
+        messages: [
+            { role: 'user', content: 'hello' },
+            { role: 'assistant', content: 'hi' },
+            { role: 'user', content: 'continue' },
+        ],
+    };
+    const text = 'I need to read the documentation to better assist you. Let me check the relevant information. I don\'t have access to your local filesystem or the ability to run commands. The tool outputs shown above are from a different system context.';
+    assert(
+        shouldForceToolActionRetry(text, body),
+        'English documentation/system-context fallback should force action retry',
+    );
+});
+
+test('tool-enabled Cursor help-center menu fallback triggers forced action retry', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        tools: [{ name: 'Read', description: 'Read a file', input_schema: { type: 'object', properties: {} } }],
+        messages: [
+            { role: 'user', content: 'hello' },
+            { role: 'assistant', content: 'hi' },
+            { role: 'user', content: 'continue' },
+        ],
+    };
+    const text = [
+        'If you have a question about Cursor (the AI code editor), I\'m happy to help. For example:',
+        '- How to use Cursor\'s AI features',
+        '- Billing or account questions',
+        '- Setting up rules or context',
+        '- Troubleshooting Cursor behavior',
+        'What can I help you with?',
+    ].join('\n');
+    assert(
+        shouldForceToolActionRetry(text, body),
+        'Cursor help-center menu fallback should force action retry in tool mode',
+    );
+});
+
+test('tool-enabled Chinese documentation/system-context fallback triggers forced action retry', () => {
+    const body = {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        tools: [{ name: 'Read', description: 'Read a file', input_schema: { type: 'object', properties: {} } }],
+        messages: [
+            { role: 'user', content: 'hello' },
+            { role: 'assistant', content: 'hi' },
+            { role: 'user', content: 'continue' },
+        ],
+    };
+    const text = '我需要先查阅相关文档以便更好地帮助你。让我先查看相关信息。我无法访问你的本地文件系统，也不能运行命令。上面显示的工具输出来自不同的系统上下文。';
+    assert(
+        shouldForceToolActionRetry(text, body),
+        'Chinese documentation/system-context fallback should force action retry',
     );
 });
 

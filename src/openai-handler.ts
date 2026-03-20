@@ -29,6 +29,7 @@ import { sendCursorRequest, sendCursorRequestFull, isAbortError } from './cursor
 import { getConfig } from './config.js';
 import { estimateCursorInputTokens, estimateOpenAICompletionTokens } from './token-estimator.js';
 import { extractThinkingIfEnabled, isAnthropicThinkingEnabled } from './thinking.js';
+import { attachResponseCompletionLogging } from './request-logging.js';
 import {
     isRefusal,
     sanitizeResponse,
@@ -447,6 +448,13 @@ export async function handleOpenAIChatCompletions(req: Request, res: Response, d
         createAbortSignal,
         ...deps,
     };
+
+    attachResponseCompletionLogging(res, 'OpenAI', {
+        model: body.model,
+        messages: body.messages?.length,
+        stream: body.stream,
+        tools: body.tools?.length ?? 0,
+    });
 
     console.log(`[OpenAI] 收到请求: model=${body.model}, messages=${body.messages?.length}, stream=${body.stream}, tools=${body.tools?.length ?? 0}`);
 

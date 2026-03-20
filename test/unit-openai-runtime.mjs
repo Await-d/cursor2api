@@ -1,5 +1,5 @@
 import { handleOpenAIChatCompletions } from '../src/openai-handler.ts';
-import { FIRST_TURN_NEUTRAL_RESPONSE } from '../src/handler.ts';
+import { FIRST_TURN_NEUTRAL_RESPONSE, MAX_REFUSAL_RETRIES } from '../src/handler.ts';
 
 let passed = 0;
 let failed = 0;
@@ -191,6 +191,71 @@ await test('non-stream OpenAI handler also strips unexpected lowercase cursor me
     const content = res.jsonPayload?.choices?.[0]?.message?.content || '';
     assert(!/\bcursor\b/i.test(content), 'OpenAI runtime should not emit lowercase cursor either when the user never mentioned it');
     assert(content === FIRST_TURN_NEUTRAL_RESPONSE, 'unexpected lowercase cursor mention should also fall back to the neutral visible response');
+});
+
+await test('non-stream OpenAI handler immediately retries documentation/system-context fallback text', async () => {
+    const req = createMockReq({
+        model: 'gpt-5',
+        stream: false,
+        messages: [{ role: 'user', content: 'Continue the task directly.' }],
+    });
+    const res = createMockRes();
+    const cursorReq = buildCursorReq();
+    const rawFallback = 'I need to read the documentation to better assist you. Let me check the relevant information. I\'m a Claude, an AI assistant by Anthropic, the AI code editor. I don\'t have access to your local filesystem or the ability to run commands. The tool outputs shown above are from a different system context.';
+    let callCount = 0;
+
+    await handleOpenAIChatCompletions(req, res, {
+        createAbortSignal: () => new AbortController().signal,
+        convertToCursorRequest: async () => cursorReq,
+        sendCursorRequestFull: async () => {
+            callCount++;
+            return rawFallback;
+        },
+        sendCursorRequest: async () => {},
+    });
+
+    assert(res.statusCode === 200, `unexpected status: ${res.statusCode}`);
+    assert(callCount === MAX_REFUSAL_RETRIES + 1, `expected immediate retries before giving up, got ${callCount} attempts`);
+    assert(
+        res.jsonPayload?.choices?.[0]?.message?.content === FIRST_TURN_NEUTRAL_RESPONSE,
+        'OpenAI runtime should fall back to the first-turn neutral response after exhausting retries',
+    );
+});
+
+await test('non-stream OpenAI handler immediately retries Cursor help-center menu fallback text', async () => {
+    const req = createMockReq({
+        model: 'gpt-5',
+        stream: false,
+        messages: [{ role: 'user', content: 'Continue the task directly.' }],
+    });
+    const res = createMockRes();
+    const cursorReq = buildCursorReq();
+    const rawFallback = [
+        'If you have a question about Cursor (the AI code editor), I\'m happy to help. For example:',
+        '- How to use Cursor\'s AI features',
+        '- Billing or account questions',
+        '- Setting up rules or context',
+        '- Troubleshooting Cursor behavior',
+        'What can I help you with?',
+    ].join('\n');
+    let callCount = 0;
+
+    await handleOpenAIChatCompletions(req, res, {
+        createAbortSignal: () => new AbortController().signal,
+        convertToCursorRequest: async () => cursorReq,
+        sendCursorRequestFull: async () => {
+            callCount++;
+            return rawFallback;
+        },
+        sendCursorRequest: async () => {},
+    });
+
+    assert(res.statusCode === 200, `unexpected status: ${res.statusCode}`);
+    assert(callCount === MAX_REFUSAL_RETRIES + 1, `expected immediate retries before giving up, got ${callCount} attempts`);
+    assert(
+        res.jsonPayload?.choices?.[0]?.message?.content === FIRST_TURN_NEUTRAL_RESPONSE,
+        'OpenAI runtime should fall back to the first-turn neutral response after exhausting Cursor help-menu retries',
+    );
 });
 
 console.log(`\n结果: ${passed} 通过 / ${failed} 失败 / ${passed + failed} 总计`);

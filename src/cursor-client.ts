@@ -4,6 +4,7 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import type { CursorChatRequest, CursorSSEEvent } from './types.js';
 import { getConfig } from './config.js';
 import { getQueue, RequestQueue, RequestAbortedError } from './queue.js';
+import { logRequestCompletion } from './request-logging.js';
 
 const CURSOR_CHAT_API_HOST = 'cursor.com';
 const CURSOR_CHAT_API_PATH = '/api/chat';
@@ -615,6 +616,7 @@ async function sendCursorRequestInner(
     const timeoutSeconds = Number.isFinite(config.timeout) ? config.timeout : 120;
     const idleTimeoutMs = Math.max(1_000, Math.round(timeoutSeconds * 1000));
     const connectTimeoutMs = Math.max(2_000, idleTimeoutMs * 2);
+    const startedAt = Date.now();
 
     console.log(`[Cursor] 发送请求: model=${req.model}, messages=${req.messages.length}${proxyUrl ? ` [proxy=${proxyUrl}]` : ''}`);
 
@@ -628,6 +630,7 @@ async function sendCursorRequestInner(
         let connectTimer: ReturnType<typeof setTimeout> | null = null;
         let settled = false;
         let abortHandler: (() => void) | null = null;
+        let responseStatusCode = 0;
 
         const clearIdle = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } };
         const clearConnect = () => { if (connectTimer) { clearTimeout(connectTimer); connectTimer = null; } };
@@ -645,6 +648,13 @@ async function sendCursorRequestInner(
             if (settled) return;
             settled = true;
             cleanup();
+            logRequestCompletion('Cursor', {
+                model: req.model,
+                messages: req.messages.length,
+                proxyUrl,
+                statusCode: responseStatusCode || 200,
+                durationMs: Date.now() - startedAt,
+            });
             resolve();
         };
 
@@ -673,6 +683,7 @@ async function sendCursorRequestInner(
             }
 
             clearConnect();
+            responseStatusCode = res.statusCode ?? 0;
 
             if (res.statusCode === 429) {
                 clearIdle();

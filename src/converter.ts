@@ -24,6 +24,7 @@ import { getConfig, resolveCursorModel } from './config.js';
 import { THINKING_HINT, isAnthropicThinkingEnabled } from './thinking.js';
 import { isWellKnownToolName } from './tool-metadata.js';
 import { fixToolCallArguments } from './tool-fixer.js';
+import { CHUNKED_ACTION_PAYLOAD_MAX_CHARS, CHUNKED_ACTION_PAYLOAD_MAX_LINES, getChunkedActionGuidance } from './chunked-action-guidance.js';
 
 type RetryPromptProfile = {
     systemPreamble: string;
@@ -376,7 +377,7 @@ function buildToolInstructions(
     const hasWriteTool = tools.some(tool => /^(Write|Edit|MultiEdit|NotebookEdit|write_file|edit_file|replace_in_file)$/i.test(tool.name));
     const hasBackgroundOutputTool = tools.some(tool => /^(background_output|BackgroundOutput)$/i.test(tool.name));
     const writeRule = hasWriteTool
-        ? 'For write-style actions (such as Write, Edit, MultiEdit, NotebookEdit, or similar file-modifying tools), keep every single action to **<=200 lines**. If you need to add or replace more than 200 lines, split the work into multiple sequential actions and append/continue in order (e.g., part 1/3, part 2/3). Never attempt to dump an entire large file in one write; chunk it to avoid failures. Once you already know what file content or edit needs to happen, stop explaining the diagnosis and emit the next concrete write/edit action immediately.'
+        ? `For write-style actions (such as Write, Edit, MultiEdit, NotebookEdit, or similar file-modifying tools), keep every single action to **<=200 lines**. Keep every content/newString payload under **${CHUNKED_ACTION_PAYLOAD_MAX_CHARS} characters** and **${CHUNKED_ACTION_PAYLOAD_MAX_LINES} lines**. If you need to add or replace more than that, split the work into multiple sequential actions and append/continue in order (for example chunk 1/3, chunk 2/3). Never attempt to dump an entire large file or long document into one write-style JSON string; create a short scaffold first, then continue with smaller staged edits. ${getChunkedActionGuidance({ firstOnly: true })} Once you already know what file content or edit needs to happen, stop explaining the diagnosis and emit the next concrete write/edit action immediately.`
         : '';
     const backgroundWaitRule = hasBackgroundOutputTool
         ? 'If you are waiting for a background task result, do not say you are waiting. Call the background_output action instead.'

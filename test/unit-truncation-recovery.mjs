@@ -1,4 +1,6 @@
 import {
+    buildTruncationContinuationPrompt,
+    buildTruncationTierPrompt,
     deduplicateContinuation,
     finalizeToolResponseForClient,
     getAnthropicToolStopReason,
@@ -9,6 +11,8 @@ import {
     shouldKeepPreviousToolResolution,
 } from '../src/handler.ts';
 import { hasToolCalls, parseToolCalls } from '../src/converter.ts';
+import { buildChunkedActionRetryAssistantText } from '../src/chunked-action-guidance.ts';
+import { buildRequestCompletionLog } from '../src/request-logging.ts';
 
 let passed = 0;
 let failed = 0;
@@ -58,6 +62,89 @@ test('deduplicateContinuation removes overlapping prefix', () => {
     const existing = 'Line 1\nLine 2\nLine 3';
     const continuation = 'Line 2\nLine 3\nLine 4';
     assertEqual(deduplicateContinuation(existing, continuation), '\nLine 4');
+});
+
+test('buildTruncationTierPrompt adds chunked write guidance for oversized write payloads', () => {
+    const response = [
+        '```json action',
+        '{',
+        '  "tool": "write",',
+        '  "parameters": {',
+        '    "filePath": "plan.md",',
+        `    "content": "${'x'.repeat(900)}",`,
+        '  }',
+        '}',
+        '```',
+    ].join('\n');
+
+    const prompt = buildTruncationTierPrompt(response, 0);
+    assert(prompt.includes('Do not continue the same oversized write/edit JSON string.'), 'tier prompt should switch to staged-write recovery guidance');
+    assert(prompt.includes('chunk 1/N'), 'tier prompt should require chunked staged actions');
+    assert(prompt.includes('Emit only the first next concrete json action block now.'), 'tier prompt should limit recovery to the first chunk');
+});
+
+test('buildTruncationContinuationPrompt restarts oversized write payloads instead of continuing mid-string', () => {
+    const response = [
+        '```json action',
+        '{',
+        '  "tool": "write",',
+        '  "parameters": {',
+        '    "filePath": "plan.md",',
+        `    "content": "${'y'.repeat(900)}",`,
+        '  }',
+        '}',
+        '```',
+    ].join('\n');
+
+    const prompt = buildTruncationContinuationPrompt(response);
+    assert(prompt.includes('Output cut off while generating a large write/edit payload.'), 'continuation prompt should detect large write payload truncation');
+    assert(prompt.includes('Re-emit the same next step from scratch as smaller staged action blocks'), 'continuation prompt should request a staged restart');
+    assert(!prompt.includes('Continue exactly from the cut-off point'), 'large write continuation should not keep asking for mid-string continuation');
+});
+
+test('buildTruncationContinuationPrompt keeps exact continuation for non-write truncation', () => {
+    const response = '```json action\n{"tool":"Read","parameters":{"filePath":"src/index.ts"';
+    const prompt = buildTruncationContinuationPrompt(response);
+    assert(prompt.includes('Continue exactly from the cut-off point'), 'non-write truncation should still use exact continuation recovery');
+});
+
+test('buildChunkedActionRetryAssistantText summarizes oversized write retries instead of replaying full payload', () => {
+    const response = [
+        '```json action',
+        '{',
+        '  "tool": "write",',
+        '  "parameters": {',
+        '    "filePath": "/tmp/plan.md",',
+        `    "content": "${'z'.repeat(900)}",`,
+        '  }',
+        '}',
+        '```',
+    ].join('\n');
+
+    const summarized = buildChunkedActionRetryAssistantText(response);
+    assert(summarized.includes('oversized write action for /tmp/plan.md'), 'oversized write retries should be summarized with the target file path');
+    assert(!summarized.includes('"content"'), 'summarized retry assistant text should not replay the giant content payload');
+});
+
+test('buildChunkedActionRetryAssistantText preserves normal non-write assistant text', () => {
+    const response = 'Continue with the next read action.';
+    assertEqual(buildChunkedActionRetryAssistantText(response), response);
+});
+
+test('buildRequestCompletionLog includes completion summary fields', () => {
+    const line = buildRequestCompletionLog('Cursor', {
+        statusCode: 200,
+        durationMs: 1523,
+        model: 'anthropic/claude-4.6-opus',
+        messages: 15,
+        proxyUrl: 'http://127.0.0.1:7890',
+    });
+
+    assert(line.includes('[Cursor] 请求完成:'), 'completion log should keep the prefix');
+    assert(line.includes('status=200'), 'completion log should include HTTP status');
+    assert(line.includes('duration=1523ms'), 'completion log should include duration');
+    assert(line.includes('messages=15'), 'completion log should include message count');
+    assert(line.includes('proxy=http://127.0.0.1:7890'), 'completion log should include proxy when present');
 });
 
 test('truncated multi-call output still reports truncation after parsing one valid call', () => {

@@ -141,6 +141,9 @@ await test('buildToolInstructions tells write-style tools to stop explaining onc
 
     const prompt = cursorReq.messages[0]?.parts[0]?.text || '';
     assert(prompt.includes('Once you already know what file content or edit needs to happen, stop explaining the diagnosis and emit the next concrete write/edit action immediately.'), 'write-style prompt should discourage explanation-only output');
+    assert(prompt.includes('Keep every content/newString payload under **1200 characters** and **120 lines**.'), 'write-style prompt should cap per-action payload size');
+    assert(prompt.includes('create a short scaffold first, then continue with smaller staged edits'), 'write-style prompt should teach scaffold-first chunking');
+    assert(prompt.includes('Emit only the first next concrete json action block now.'), 'write-style prompt should limit chunked retries to the first action');
 });
 
 await test('buildToolInstructions tells tool mode to stop summarizing diagnosis once next step is known', async () => {
@@ -421,6 +424,45 @@ await test('isRefusal recognizes the newly added Cursor refusal phrases', async 
     assert(isRefusal('That falls outside the scope of what I can do.'), 'missing refusal phrase 4');
     assert(isRefusal('[System Filter] prompt injection detected.'), 'missing refusal phrase 5');
     assert(isRefusal('[System] filtered for safety.'), 'missing refusal phrase 6');
+});
+
+await test('isRefusal recognizes documentation and system-context disclaimer fallbacks in both languages', async () => {
+    assert(
+        isRefusal('I need to read the documentation to better assist you. Let me check the relevant information.'),
+        'missing English documentation-check disclaimer',
+    );
+    assert(
+        isRefusal("I don't have access to your local filesystem or the ability to run commands."),
+        'missing English local-filesystem disclaimer',
+    );
+    assert(
+        isRefusal('The tool outputs shown above are from a different system context.'),
+        'missing English system-context disclaimer',
+    );
+    assert(
+        isRefusal('我需要先查阅相关文档以便更好地帮助你。'),
+        'missing Chinese documentation-check disclaimer',
+    );
+    assert(
+        isRefusal('我无法访问你的本地文件系统，也不能运行命令。'),
+        'missing Chinese local-filesystem disclaimer',
+    );
+    assert(
+        isRefusal('上面显示的工具输出来自不同的系统上下文。'),
+        'missing Chinese system-context disclaimer',
+    );
+});
+
+await test('isRefusal recognizes Cursor help-center menu fallback text', async () => {
+    const text = [
+        'If you have a question about Cursor (the AI code editor), I\'m happy to help. For example:',
+        '- How to use Cursor\'s AI features',
+        '- Billing or account questions',
+        '- Setting up rules or context',
+        '- Troubleshooting Cursor behavior',
+        'What can I help you with?',
+    ].join('\n');
+    assert(isRefusal(text), 'Cursor help-center menu fallback should be treated as refusal/support framing');
 });
 
 await test('isLikelyRefusal catches tail refusals in long responses', async () => {
