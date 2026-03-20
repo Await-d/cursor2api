@@ -1259,6 +1259,7 @@ function extractLooseLargeStringFieldValue(jsonStr: string, fieldName: string, k
             .slice(valueStart)
             .replace(/"\s*(?:[,}\]])*\s*$/, '');
         rawTail = rawTail.replace(/\n\s*}\s*,?\s*\n\s*}(?:\s*\n```)?\s*$/, '');
+        if (rawTail === '"') return '';
         return decodeLooseStringValue(rawTail);
     }
 
