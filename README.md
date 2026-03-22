@@ -233,9 +233,10 @@ npm run docker:deploy
 ```
 
 说明：
-- `docker compose restart` 只适合重新读取挂载进容器的 `config.yaml`
+- `docker compose restart` 适合让容器重新读取已通过 Web 管理面板或手工修改后的 `config.yaml`
 - 修改了 `src/`、`package.json`、`package-lock.json`、`tsconfig.json` 后，必须重新 build + recreate
 - `.env.docker` 变更会影响容器环境变量，应执行 `docker compose up -d --force-recreate`
+- Web 管理面板保存会继续写入 `config.yaml`，并在容器内挂载了 `ADMIN_ENV_FILE_PATH` 时同步更新 `.env.docker` 中可映射的环境变量项
 - 运行时环境变量统一放在 `.env.docker`；`config.yaml` 用于应用配置，若两边都定义同名项，则环境变量优先
 - Docker 下推荐把开关型配置放进 `.env.docker`；例如 `ENABLE_THINKING=true`，而结构化应用配置继续放在 `config.yaml`
 - 部署脚本 `./deploy.sh --docker` 现在会等待所有容器通过健康检查后再返回
