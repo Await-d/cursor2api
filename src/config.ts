@@ -4,7 +4,12 @@ import type { AirportSubscriptionConfig, AppConfig, ProxySubscriptionConfig } fr
 
 let config: AppConfig;
 
-function readFiniteInt(raw: unknown): number | undefined {
+export function getConfigPath(): string {
+    const configuredPath = process.env.CONFIG_YAML_PATH?.trim();
+    return configuredPath || 'config.yaml';
+}
+
+export function readFiniteInt(raw: unknown): number | undefined {
     if (raw === undefined || raw === null) return undefined;
 
     let value: number;
@@ -94,7 +99,7 @@ function normalizeRoutingConfig(current: AppConfig): void {
     })).filter((subscription) => Boolean(subscription.url));
 }
 
-function parseModelMapping(raw: unknown): Record<string, string> {
+export function parseModelMapping(raw: unknown): Record<string, string> {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
         return {};
     }
@@ -111,7 +116,7 @@ function parseModelMapping(raw: unknown): Record<string, string> {
     return mapping;
 }
 
-function parseProxySubscriptions(raw: unknown, defaultRefreshMs: number): ProxySubscriptionConfig[] {
+export function parseProxySubscriptions(raw: unknown, defaultRefreshMs: number): ProxySubscriptionConfig[] {
     if (!Array.isArray(raw)) {
         return [];
     }
@@ -181,7 +186,7 @@ function parseHeaders(raw: unknown): Record<string, string> {
     return headers;
 }
 
-function parseAirportSubscriptions(raw: unknown): AirportSubscriptionConfig[] {
+export function parseAirportSubscriptions(raw: unknown): AirportSubscriptionConfig[] {
     if (!Array.isArray(raw)) {
         return [];
     }
@@ -245,11 +250,8 @@ export function resolveCursorModel(requestedModel?: string): string {
     return modelMapping[requestedModel] || modelMapping['*'] || cursorModel;
 }
 
-export function getConfig(): AppConfig {
-    if (config) return config;
-
-    // 默认配置
-    config = {
+export function createDefaultConfig(): AppConfig {
+    return {
         port: 3010,
         timeout: 120,
         cursorModel: 'anthropic/claude-sonnet-4.6',
@@ -288,11 +290,24 @@ export function getConfig(): AppConfig {
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
         },
     };
+}
+
+export function isTruthyEnvValue(raw: string): boolean {
+    return /^(1|true|yes|on)$/i.test(raw);
+}
+
+export function getConfig(): AppConfig {
+    if (config) return config;
+
+    const configPath = getConfigPath();
+
+    // 默认配置
+    config = createDefaultConfig();
 
     // 从 config.yaml 加载
-    if (existsSync('config.yaml')) {
+    if (existsSync(configPath)) {
         try {
-            const raw = readFileSync('config.yaml', 'utf-8');
+            const raw = readFileSync(configPath, 'utf-8');
             const yaml = parseYaml(raw);
             if (yaml.port) config.port = yaml.port;
             if (yaml.timeout) config.timeout = yaml.timeout;
@@ -368,7 +383,7 @@ export function getConfig(): AppConfig {
                 config.proxyPool = [config.proxy];
             }
         } catch (e) {
-            console.warn('[Config] 读取 config.yaml 失败:', e);
+            console.warn(`[Config] 读取 ${configPath} 失败:`, e);
         }
     }
 
@@ -391,7 +406,7 @@ export function getConfig(): AppConfig {
     if (envProxySubscriptionTimeoutMs !== undefined) config.proxySubscriptionTimeoutMs = envProxySubscriptionTimeoutMs;
     const envProxySubscriptionMaxBytes = readFiniteInt(process.env.PROXY_SUBSCRIPTION_MAX_BYTES);
     if (envProxySubscriptionMaxBytes !== undefined) config.proxySubscriptionMaxBytes = envProxySubscriptionMaxBytes;
-    if (process.env.PROXY_SUBSCRIPTION_API_ENABLED) config.proxySubscriptionApiEnabled = /^(1|true|yes|on)$/i.test(process.env.PROXY_SUBSCRIPTION_API_ENABLED);
+    if (process.env.PROXY_SUBSCRIPTION_API_ENABLED) config.proxySubscriptionApiEnabled = isTruthyEnvValue(process.env.PROXY_SUBSCRIPTION_API_ENABLED);
     if (process.env.PROXY_SUBSCRIPTION_API_TOKEN) config.proxySubscriptionApiToken = process.env.PROXY_SUBSCRIPTION_API_TOKEN;
     if (process.env.AIRPORT_RUNTIME_BINARY_PATH) config.airportRuntimeBinaryPath = process.env.AIRPORT_RUNTIME_BINARY_PATH;
     const envAirportRuntimeSocksPort = readFiniteInt(process.env.AIRPORT_RUNTIME_SOCKS_PORT);
@@ -414,7 +429,7 @@ export function getConfig(): AppConfig {
     if (envProxyPauseBaseMs !== undefined) config.proxyPauseBaseMs = envProxyPauseBaseMs;
     const envProxyPauseMaxMs = readFiniteInt(process.env.PROXY_PAUSE_MAX_MS);
     if (envProxyPauseMaxMs !== undefined) config.proxyPauseMaxMs = envProxyPauseMaxMs;
-    if (process.env.ENABLE_THINKING) config.enableThinking = /^(1|true|yes|on)$/i.test(process.env.ENABLE_THINKING);
+    if (process.env.ENABLE_THINKING) config.enableThinking = isTruthyEnvValue(process.env.ENABLE_THINKING);
     if (process.env.SYSTEM_PROMPT_INJECT) config.systemPromptInject = process.env.SYSTEM_PROMPT_INJECT;
     if (process.env.MODEL_MAPPING) {
         try {
