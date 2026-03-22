@@ -9,6 +9,7 @@ import 'dotenv/config';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 initWebLogger();
 import { createRequire } from 'module';
+import { existsSync } from 'fs';
 import express, { type Request, type Response } from 'express';
 import { getAirportRuntimeSnapshot, initAirportRuntime } from './airport-runtime.js';
 import { getConfig } from './config.js';
@@ -171,7 +172,22 @@ app.get('/airport/runtime', (_req, res) => {
 
 
 
-const publicDir = join(__dirname, __dirname.endsWith('/src') ? 'public' : '../src/public');
+function resolveAdminPublicDir(): string {
+    const candidates = [
+        join(__dirname, 'public'),
+        join(__dirname, '../src/public'),
+    ];
+
+    for (const candidate of candidates) {
+        if (existsSync(join(candidate, 'index.html'))) {
+            return candidate;
+        }
+    }
+
+    return candidates[0];
+}
+
+const publicDir = resolveAdminPublicDir();
 app.get('/admin/logs', (_req, res) => { registerSseClient(res); });
 app.get('/admin/logs/snapshot', (_req, res) => { res.json({ logs: getRecentLogs() }); });
 app.get('/admin/config', handleGetConfig);
@@ -188,6 +204,11 @@ app.get('/health', (_req, res) => {
 
 // 根路径
 app.get('/', (_req, res) => {
+    if ((_req.header('accept') || '').includes('text/html')) {
+        res.redirect(302, '/admin/');
+        return;
+    }
+
     res.json({
         name: 'cursor2api',
         version: VERSION,
