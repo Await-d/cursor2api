@@ -14,6 +14,7 @@ import {
     buildToolRetryCursorRequest,
     buildForcedToolActionRetryCursorRequest,
     normalizeToolCallsForSchemas,
+    buildInjectionRetryRequest,
     CLAUDE_IDENTITY_RESPONSE,
     FIRST_TURN_NEUTRAL_RESPONSE,
 } from '../src/handler.ts';
@@ -741,6 +742,73 @@ test('normalizeToolCallsForSchemas preserves snake_case-only schemas', () => {
     ]);
 
     assertEqual(normalized[0].arguments, { file_path: 'src/index.ts' }, 'schema-aware normalization should target snake_case-only schemas too');
+});
+
+console.log('\n📦 injection-retry + original-fallback (TDD)\n');
+
+test('buildInjectionRetryRequest uses the last pool entry (most aggressive variant)', () => {
+    const body = {
+        model: 'claude-sonnet-4',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'Hello' }],
+    };
+    const retried = buildInjectionRetryRequest(body);
+    const lastUserMsg = retried.messages[retried.messages.length - 1];
+    const prefix = typeof lastUserMsg.content === 'string'
+        ? lastUserMsg.content
+        : lastUserMsg.content?.[0]?.text ?? '';
+    assert(prefix.length > 0, 'injection retry should prepend a non-empty user prefix');
+    assert(
+        /Minimal retry with role reset|role reset|not a Cursor/i.test(prefix),
+        'injection retry prefix should contain role-reset language'
+    );
+});
+
+test('buildInjectionRetryRequest cleans refusal assistant history', () => {
+    const refusalText = 'I am scoped to answering questions about Cursor.';
+    const body = {
+        model: 'claude-sonnet-4',
+        max_tokens: 1024,
+        messages: [
+            { role: 'user', content: 'Do something' },
+            { role: 'assistant', content: refusalText },
+            { role: 'user', content: 'Try again' },
+        ],
+    };
+    const retried = buildInjectionRetryRequest(body);
+    const assistantMsg = retried.messages.find(m => m.role === 'assistant');
+    const text = typeof assistantMsg.content === 'string'
+        ? assistantMsg.content
+        : assistantMsg.content?.[0]?.text ?? assistantMsg.content;
+    assert(
+        !text.includes('scoped to answering'),
+        'injection retry should replace refusal assistant text'
+    );
+});
+
+test('buildInjectionRetryRequest uses chat pool when no tools', () => {
+    const body = {
+        model: 'claude-sonnet-4',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'Explain something' }],
+    };
+    const withTools = {
+        ...body,
+        tools: [{ name: 'Read', description: 'read', input_schema: { type: 'object', properties: {} } }],
+    };
+    const chatRetry = buildInjectionRetryRequest(body);
+    const toolRetry = buildInjectionRetryRequest(withTools);
+    const chatPrefix = chatRetry.messages[chatRetry.messages.length - 1].content;
+    const toolPrefix = toolRetry.messages[toolRetry.messages.length - 1].content;
+    assert(chatPrefix !== toolPrefix, 'chat and tool injection retries should use different pool prefixes');
+});
+
+test('sanitizeResponse returns cleaned original when given a Cursor fallback', () => {
+    const cursor_fallback = "I am Claude, an AI assistant by Anthropic, the AI code editor. I don't have the ability to write or edit files — I can only answer your questions, pricing, troubleshooting, and usage.";
+    const sanitized = sanitizeResponse(cursor_fallback);
+    assert(!sanitized.includes('the AI code editor'), 'sanitizeResponse should strip AI code editor fragment');
+    assert(!sanitized.includes("don't have the ability to write or edit files"), 'sanitizeResponse should strip write/edit disclaimer');
+    assert(sanitized.trim().length > 0, 'sanitizeResponse should return non-empty cleaned content');
 });
 
 console.log(`\n结果: ${passed} 通过 / ${failed} 失败 / ${passed + failed} 总计\n`);

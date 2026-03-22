@@ -162,6 +162,39 @@ await test('buildToolInstructions tells tool mode to stop summarizing diagnosis 
     assert(prompt.includes('Once you already understand the diagnosis or next step, stop summarizing it and emit the next concrete action directly.'), 'general tool prompt should discourage diagnosis-only prose');
 });
 
+await test('buildToolInstructions enforces local file inspection for project-understanding requests', async () => {
+    const cursorReq = await convertToCursorRequest({
+        model: 'claude-sonnet-4',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'Please explain this project structure and module boundaries.' }],
+        tools: [{
+            name: 'Read',
+            description: 'Read file contents from disk',
+            input_schema: { type: 'object', properties: { filePath: { type: 'string' } } },
+        }],
+    });
+
+    const prompt = cursorReq.messages[0]?.parts[0]?.text || '';
+    assert(prompt.includes('For project-understanding requests (project structure, architecture, module boundaries, entry points, file locations, or “how this project works”), you MUST first inspect local files with available local tools'), 'project-understanding prompt should force local inspection first');
+    assert(prompt.includes('Start with one concrete local inspection action block before giving conclusions'), 'project-understanding prompt should require tool-first behavior');
+});
+
+await test('buildToolInstructions avoids project-understanding injection for unrelated requests', async () => {
+    const cursorReq = await convertToCursorRequest({
+        model: 'claude-sonnet-4',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: 'Refactor src/utils/math.ts to simplify this helper.' }],
+        tools: [{
+            name: 'Read',
+            description: 'Read file contents from disk',
+            input_schema: { type: 'object', properties: { filePath: { type: 'string' } } },
+        }],
+    });
+
+    const prompt = cursorReq.messages[0]?.parts[0]?.text || '';
+    assert(!prompt.includes('For project-understanding requests (project structure, architecture, module boundaries, entry points, file locations, or “how this project works”)'), 'non-project request should not include project-understanding forcing rule');
+});
+
 await test('buildToolInstructions tells tool mode to call background_output instead of saying it is waiting', async () => {
     const cursorReq = await convertToCursorRequest({
         model: 'claude-sonnet-4',
@@ -471,6 +504,28 @@ await test('isRefusal recognizes Cursor help-center menu fallback text', async (
         'What can I help you with?',
     ].join('\n');
     assert(isRefusal(text), 'Cursor help-center menu fallback should be treated as refusal/support framing');
+});
+
+await test('isRefusal recognizes "the AI code editor" identity fragment', async () => {
+    assert(
+        isRefusal('I am Claude, an AI assistant by Anthropic, the AI code editor.'),
+        'AI code editor identity fragment should be caught as refusal',
+    );
+    assert(
+        isRefusal("I don't have the ability to write or edit files — I can only answer your questions, pricing, and troubleshooting."),
+        'write/edit files disclaimer should be caught as refusal',
+    );
+    assert(
+        isRefusal("I am Claude, an AI assistant by Anthropic, the AI code editor. I don't have the ability to write or edit files — I can only answer your questions, pricing, troubleshooting, and usage."),
+        'full multi-turn Cursor fallback response should be caught as refusal',
+    );
+});
+
+await test('sanitizeResponse strips "the AI code editor" identity fragment', async () => {
+    const { sanitizeResponse } = await import('../src/handler.ts');
+    const input = 'I am Claude, an AI assistant by Anthropic, the AI code editor. How can I help?';
+    const output = sanitizeResponse(input);
+    assert(!output.includes('the AI code editor'), 'sanitizeResponse should strip the AI code editor fragment');
 });
 
 await test('isLikelyRefusal catches tail refusals in long responses', async () => {
