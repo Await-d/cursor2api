@@ -351,7 +351,7 @@ label{font-size:12px;color:var(--text3);display:block;margin-bottom:5px;font-wei
     <div style="display:flex;gap:8px;align-items:center">
       <button class="btn-p" id="cfg-save">💾 保存配置</button>
       <button id="cfg-reload">↺ 重新加载</button>
-      <span style="font-size:12px;color:var(--text3);margin-left:4px">保存后需重启服务生效</span>
+      <span style="font-size:12px;color:var(--text3);margin-left:4px">保存后需重启服务；若改动 .env.docker 需 force-recreate 容器</span>
     </div>
   </div>
   <div class="card">
@@ -526,6 +526,25 @@ function readAirportSubs(){
   }).filter(s=>s.url);
 }
 
+function parseOptionalInt(value){
+  const trimmed=String(value).trim();
+  if(!trimmed)return undefined;
+  const parsed=Number(trimmed);
+  return Number.isFinite(parsed)?Math.trunc(parsed):undefined;
+}
+
+function parseOptionalJson(id,errorMessage){
+  const raw=$(id).value.trim();
+  if(!raw)return{ok:true,value:undefined};
+  try{return{ok:true,value:JSON.parse(raw)};}catch(err){showToast(errorMessage,false);return{ok:false};}
+}
+
+async function readJsonResponse(response){
+  const text=await response.text();
+  if(!text)return{};
+  try{return JSON.parse(text);}catch(err){return{ok:false,error:text||('HTTP '+response.status)};}
+}
+
 $('airport-sub-add').addEventListener('click',()=>{
   $('airport-sub-list').appendChild(mkAirportSubItem({}));
 });
@@ -583,45 +602,46 @@ function loadConfig(){
     $('running-json').innerHTML=jsonHL(d.config);
   }).catch(()=>{$('running-json').textContent='加载失败';});
 }
-$('cfg-save').addEventListener('click',()=>{
+$('cfg-save').addEventListener('click',async()=>{
   const pool=$('cfg-proxy-pool').value.split('\n').map(s=>s.trim()).filter(Boolean);
-  let modelMap=undefined;
-  try{const v=$('cfg-model-mapping').value.trim();if(v)modelMap=JSON.parse(v);}catch(e){showToast('模型映射 JSON 格式错误',false);return;}
-  const ni=v=>parseInt(v)||undefined;
+  const modelMap=parseOptionalJson('cfg-model-mapping','模型映射 JSON 格式错误');
+  if(!modelMap.ok)return;
+  const proxySubscriptions=parseOptionalJson('cfg-proxy-subscriptions','代理订阅 JSON 格式错误');
+  if(!proxySubscriptions.ok)return;
   const body={
-    port:ni($('cfg-port').value),
-    timeout:ni($('cfg-timeout').value),
+    port:parseOptionalInt($('cfg-port').value),
+    timeout:parseOptionalInt($('cfg-timeout').value),
     cursor_model:$('cfg-cursor-model').value||undefined,
-    concurrency:ni($('cfg-concurrency').value),
-    queue_timeout:ni($('cfg-queue-timeout').value),
-    retry_delay:ni($('cfg-retry-delay').value),
-    max_retry_delay:ni($('cfg-max-retry-delay').value),
-    direct_429_cooldown_ms:ni($('cfg-direct429').value),
-    proxy_health_check_interval_ms:ni($('cfg-proxy-hc').value),
-    proxy_probe_timeout_ms:ni($('cfg-proxy-probe').value),
-    proxy_pause_base_ms:ni($('cfg-proxy-pause-base').value),
-    proxy_pause_max_ms:ni($('cfg-proxy-pause-max').value),
+    concurrency:parseOptionalInt($('cfg-concurrency').value),
+    queue_timeout:parseOptionalInt($('cfg-queue-timeout').value),
+    retry_delay:parseOptionalInt($('cfg-retry-delay').value),
+    max_retry_delay:parseOptionalInt($('cfg-max-retry-delay').value),
+    direct_429_cooldown_ms:parseOptionalInt($('cfg-direct429').value),
+    proxy_health_check_interval_ms:parseOptionalInt($('cfg-proxy-hc').value),
+    proxy_probe_timeout_ms:parseOptionalInt($('cfg-proxy-probe').value),
+    proxy_pause_base_ms:parseOptionalInt($('cfg-proxy-pause-base').value),
+    proxy_pause_max_ms:parseOptionalInt($('cfg-proxy-pause-max').value),
     proxy:$('cfg-proxy').value||undefined,
     enable_thinking:$('cfg-enable-thinking').checked,
     system_prompt_inject:$('cfg-system-prompt').value,
     proxy_pool:pool,
-    proxy_subscription_refresh_ms:ni($('cfg-sub-refresh').value),
-    proxy_subscription_timeout_ms:ni($('cfg-sub-timeout').value),
-    proxy_subscription_max_bytes:ni($('cfg-sub-maxbytes').value),
+    proxy_subscription_refresh_ms:parseOptionalInt($('cfg-sub-refresh').value),
+    proxy_subscription_timeout_ms:parseOptionalInt($('cfg-sub-timeout').value),
+    proxy_subscription_max_bytes:parseOptionalInt($('cfg-sub-maxbytes').value),
     proxy_subscription_api_enabled:$('cfg-sub-api-enabled').checked,
     proxy_subscription_api_token:$('cfg-sub-api-token').value||undefined,
     airport_runtime_binary_path:$('cfg-airport-bin').value||undefined,
-    airport_runtime_socks_port:ni($('cfg-airport-socks').value),
-    airport_runtime_control_port:ni($('cfg-airport-ctrl').value),
+    airport_runtime_socks_port:parseOptionalInt($('cfg-airport-socks').value),
+    airport_runtime_control_port:parseOptionalInt($('cfg-airport-ctrl').value),
     airport_runtime_work_dir:$('cfg-airport-workdir').value||undefined,
     airport_runtime_test_url:$('cfg-airport-testurl').value||undefined,
-    airport_runtime_test_interval_seconds:ni($('cfg-airport-interval').value),
+    airport_runtime_test_interval_seconds:parseOptionalInt($('cfg-airport-interval').value),
     airport_runtime_log_level:$('cfg-airport-loglevel').value||undefined,
     airport_runtime_mode:$('cfg-airport-mode').value||undefined,
     airport_runtime_group_type:$('cfg-airport-grouptype').value||undefined,
     airport_runtime_group_strategy:$('cfg-airport-groupstrategy').value,
-    model_mapping:modelMap,
-    proxy_subscriptions:(()=>{try{const v=$('cfg-proxy-subscriptions').value.trim();return v?JSON.parse(v):undefined;}catch(e){showToast('代理订阅 JSON 格式错误',false);throw e;}})(),
+    model_mapping:modelMap.value,
+    proxy_subscriptions:proxySubscriptions.value,
     airport_subscriptions:readAirportSubs(),
     fingerprint:$('cfg-ua').value?{user_agent:$('cfg-ua').value}:undefined,
     vision:{
@@ -633,11 +653,16 @@ $('cfg-save').addEventListener('click',()=>{
     }
   };
   Object.keys(body).forEach(k=>body[k]===undefined&&delete body[k]);
-  fetch('/admin/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
-    .then(r=>r.json()).then(d=>{
-      if(d.ok)showToast(d.message||'配置已保存',true);
-      else showToast('保存失败: '+(d.error||'未知错误'),false);
-    }).catch(err=>showToast('请求失败: '+err.message,false));
+  try{
+    const response=await fetch('/admin/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const result=await readJsonResponse(response);
+    if(response.ok&&result.ok){
+      showToast(result.message||'配置已保存',true);
+      loadConfig();
+      return;
+    }
+    showToast('保存失败: '+(result.error||('HTTP '+response.status)),false);
+  }catch(err){showToast('请求失败: '+err.message,false);}
 });
 $('cfg-reload').addEventListener('click',loadConfig);
 })();
