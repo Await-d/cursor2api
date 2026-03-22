@@ -46,6 +46,9 @@ const CHAT_REFRAMING_PREFIX = `You are helping with a real software workflow. Yo
 const FIRST_TURN_CHAT_INSTRUCTION_BASE = `This is the first reply to the user in this conversation. Answer the user directly. ${FIRST_TURN_IDENTITY_DISCLAIMER_BLOCKLIST} If such text would be produced, replace it with a direct task-focused answer. Do not say that you need to explore the project or read documentation before helping.`;
 
 const CURSOR_WORD_PATTERN = /\bcursor(?:'s)?\b/i;
+const PROJECT_CONTEXT_KEYWORD_PATTERN = /(project|repository|repo|codebase|source\s+tree|folder\s+structure|module\s+boundary|architecture|entry\s+point|项目|仓库|代码库|工程|目录结构|项目结构|模块边界|架构|入口文件|本地文件|源码|代码结构)/i;
+const PROJECT_UNDERSTANDING_INTENT_PATTERN = /(understand|overview|walk\s+through|explain|analy[sz]e|map\s+out|inspect|familiari[sz]e|how\s+(?:the|this)\s+(?:project|repo|codebase)\s+works|where\s+is|which\s+file|read\s+(?:the\s+)?(?:project|repo|codebase)|了解|理解|介绍|讲解|分析|梳理|看下|看看|熟悉|怎么实现|如何实现|哪个文件|在哪个文件|读取本地文件|读一下|先读)/i;
+const PROJECT_UNDERSTANDING_DIRECT_PATTERN = /(?:项目|仓库|代码库|工程).{0,8}(?:是干什么|做什么|结构|架构|模块|入口|如何|怎么|了解|理解|分析|梳理)|(?:how\s+does\s+this\s+(?:project|repo|codebase)\s+work)|(?:explain\s+the\s+(?:project|repo|codebase)\s+(?:structure|architecture))/i;
 
 function buildFirstTurnToolInstruction(userMentionedCursor: boolean): string {
     const cursorClause = userMentionedCursor
@@ -145,6 +148,44 @@ export function isFirstAssistantTurnRequest(messages?: AnthropicRequest['message
 export function requestMentionsCursor(messages?: AnthropicRequest['messages']): boolean {
     if (!Array.isArray(messages) || messages.length === 0) return false;
     return messages.some(message => message.role === 'user' && CURSOR_WORD_PATTERN.test(extractMessageText(message)));
+}
+
+function extractLatestUserTextMessage(messages?: AnthropicRequest['messages']): string {
+    if (!Array.isArray(messages) || messages.length === 0) return '';
+
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const message = messages[i];
+        if (message.role !== 'user') continue;
+
+        if (typeof message.content === 'string') {
+            const trimmed = message.content.trim();
+            if (trimmed) return trimmed;
+            continue;
+        }
+
+        if (!Array.isArray(message.content)) continue;
+
+        const text = message.content
+            .filter(block => block.type === 'text' && typeof block.text === 'string')
+            .map(block => (block.text as string).trim())
+            .filter(Boolean)
+            .join('\n')
+            .trim();
+
+        if (text) return text;
+    }
+
+    return '';
+}
+
+export function isProjectUnderstandingQuestion(messages?: AnthropicRequest['messages']): boolean {
+    const latestUserText = extractLatestUserTextMessage(messages);
+    if (!latestUserText) return false;
+
+    if (PROJECT_UNDERSTANDING_DIRECT_PATTERN.test(latestUserText)) return true;
+
+    return PROJECT_CONTEXT_KEYWORD_PATTERN.test(latestUserText)
+        && PROJECT_UNDERSTANDING_INTENT_PATTERN.test(latestUserText);
 }
 
 function hasStaleRoleFraming(text: string): boolean {
@@ -353,6 +394,7 @@ function buildToolInstructions(
     toolChoice?: AnthropicRequest['tool_choice'],
     isFirstAssistantTurn = false,
     userMentionedCursor = false,
+    enforceProjectInspection = false,
 ): string {
     if (!tools || tools.length === 0) return '';
 
@@ -376,18 +418,22 @@ function buildToolInstructions(
 
     const hasWriteTool = tools.some(tool => /^(Write|Edit|MultiEdit|NotebookEdit|write_file|edit_file|replace_in_file)$/i.test(tool.name));
     const hasBackgroundOutputTool = tools.some(tool => /^(background_output|BackgroundOutput)$/i.test(tool.name));
+    const hasLocalInspectionTool = tools.some(tool => /^(Read|LS|Glob|Grep|Tree|Bash|read_file|read_dir|list_dir|search_files|execute_command|RunCommand)$/i.test(tool.name));
     const writeRule = hasWriteTool
         ? `For write-style actions (such as Write, Edit, MultiEdit, NotebookEdit, or similar file-modifying tools), keep every single action to **<=200 lines**. Keep every content/newString payload under **${CHUNKED_ACTION_PAYLOAD_MAX_CHARS} characters** and **${CHUNKED_ACTION_PAYLOAD_MAX_LINES} lines**. If you need to add or replace more than that, split the work into multiple sequential actions and append/continue in order (for example chunk 1/3, chunk 2/3). Never attempt to dump an entire large file or long document into one write-style JSON string; create a short scaffold first, then continue with smaller staged edits. ${getChunkedActionGuidance({ firstOnly: true })} Once you already know what file content or edit needs to happen, stop explaining the diagnosis and emit the next concrete write/edit action immediately.`
         : '';
     const backgroundWaitRule = hasBackgroundOutputTool
         ? 'If you are waiting for a background task result, do not say you are waiting. Call the background_output action instead.'
         : '';
+    const projectInspectionRule = (enforceProjectInspection && hasLocalInspectionTool)
+        ? 'For project-understanding requests (project structure, architecture, module boundaries, entry points, file locations, or “how this project works”), you MUST first inspect local files with available local tools (prefer Read/Glob/Grep/LS, or Bash if needed). Start with one concrete local inspection action block before giving conclusions, and base the explanation on actual file evidence instead of assumptions.'
+        : '';
 
     const behaviorRules = hasCommunicationTool
         ? `When an action is useful, always include the structured block. Start with a single immediate action block and no explanatory preamble. Only include multiple blocks when they are genuinely independent and short. For dependent actions (where one result feeds into the next), wait for each result. Once you already understand the diagnosis or next step, stop summarizing it and emit the next concrete action directly. When you need to finish or ask the user something, use the communication actions (attempt_completion, ask_followup_question). Do not output empty, ceremonial, or placeholder commands such as \"echo 'Done'\", \"echo 'Analysis complete'\", or other bash no-op completion markers.`
         : `When an action is useful, include the structured block. Start with a single immediate action block and no explanatory preamble. Only include multiple blocks when they are clearly independent and short. For dependent actions, wait for each result. Once you already understand the diagnosis or next step, stop summarizing it and emit the next concrete action directly. If no action is needed, answer plainly without any structured block. Do not output meaningless commands like "echo ready", "echo 'Done'", "echo 'Analysis complete'", or other bash no-op completion markers.`;
 
-    const combinedRules = [behaviorRules, writeRule, backgroundWaitRule].filter(Boolean).join(' ');
+    const combinedRules = [behaviorRules, writeRule, backgroundWaitRule, projectInspectionRule].filter(Boolean).join(' ');
     const firstTurnInstruction = isFirstAssistantTurn ? `${buildFirstTurnToolInstruction(userMentionedCursor)}\n\n` : '';
 
     return `You are a versatile AI coding assistant with full tool access inside an IDE-style workflow.
@@ -459,6 +505,7 @@ export async function convertToCursorRequest(req: AnthropicRequest): Promise<Cur
     const thinkingEnabled = isAnthropicThinkingEnabled(req.thinking, config.enableThinking);
     const isFirstAssistantTurn = isFirstAssistantTurnRequest(req.messages);
     const userMentionedCursor = requestMentionsCursor(req.messages);
+    const projectUnderstandingQuestion = isProjectUnderstandingQuestion(req.messages);
 
     const messages: CursorMessage[] = [];
     const hasTools = Boolean(req.tools && req.tools.length > 0);
@@ -480,7 +527,14 @@ export async function convertToCursorRequest(req: AnthropicRequest): Promise<Cur
         console.log(`[Converter] 工具数量: ${tools.length}, tool_choice: ${toolChoice?.type ?? 'auto'}`);
 
         const hasCommunicationTool = tools.some(t => ['attempt_completion', 'ask_followup_question', 'AskFollowupQuestion'].includes(t.name));
-        let toolInstructions = buildToolInstructions(tools, hasCommunicationTool, toolChoice, isFirstAssistantTurn, userMentionedCursor);
+        let toolInstructions = buildToolInstructions(
+            tools,
+            hasCommunicationTool,
+            toolChoice,
+            isFirstAssistantTurn,
+            userMentionedCursor,
+            projectUnderstandingQuestion,
+        );
         let firstTextualUserSeen = false;
 
         // 系统提示词与工具指令合并
