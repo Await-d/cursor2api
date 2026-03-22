@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "tsc && node copy-public.mjs",
     "start": "node dist/index.js",
     "docker:build": "docker compose build",
     "docker:up": "docker compose up -d",

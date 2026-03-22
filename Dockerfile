@@ -11,6 +11,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 # 拷贝项目源代码并执行 TypeScript 编译
+COPY copy-public.mjs ./
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
