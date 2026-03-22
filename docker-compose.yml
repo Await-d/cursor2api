@@ -11,10 +11,11 @@ x-cursor2api-common: &cursor2api-common
   environment:
     NODE_ENV: production
     PORT: 3010
+    ADMIN_ENV_FILE_PATH: /app/.env.docker
     AIRPORT_RUNTIME_WORK_DIR: ${AIRPORT_RUNTIME_WORK_DIR:-/app/.cursor2api-airport}
   volumes:
-    # 挂载外部配置文件（推荐）——修改后只需 docker compose restart 即可生效
-    - ${CONFIG_YAML_PATH:-./config.yaml}:/app/config.yaml:ro
+    - ${CONFIG_YAML_PATH:-./config.yaml}:/app/config.yaml
+    - ${DOCKER_ENV_FILE:-./.env.docker}:/app/.env.docker
   logging:
     driver: json-file
     options:
