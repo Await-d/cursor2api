@@ -1,6 +1,6 @@
 {
   "name": "cursor2api",
-  "version": "2.6.6-fork.1",
+  "version": "2.0.0",
   "description": "Proxy Cursor docs AI to Anthropic Messages API for Claude Code",
   "type": "module",
   "scripts": {
@@ -12,7 +12,6 @@
     "docker:deploy": "docker compose up -d --build --force-recreate --remove-orphans",
     "docker:logs": "docker compose logs -f --tail=200",
     "test:unit": "node test/unit-tolerant-parse.mjs",
-
     "test:retry-prompt-pool": "node --import tsx test/unit-retry-prompt-pool.mjs",
     "test:sanitize-response": "node --import tsx test/unit-sanitize-response.mjs",
     "test:proxy-subscriptions": "node --import tsx test/unit-proxy-subscriptions.mjs",
@@ -26,7 +25,6 @@
     "test:converter-features": "node --import tsx test/unit-converter-features.mjs",
     "test:truncation": "node --import tsx test/unit-truncation-recovery.mjs",
     "test:all": "node test/unit-tolerant-parse.mjs && node --import tsx test/unit-retry-prompt-pool.mjs && node --import tsx test/unit-sanitize-response.mjs && node --import tsx test/unit-proxy-subscriptions.mjs && node --import tsx test/unit-airport-runtime.mjs && node --import tsx test/unit-queue-runtime.mjs && node --import tsx test/unit-admin-config.mjs && node test/unit-tool-fixer.mjs && node test/unit-openai-compat.mjs && node --import tsx test/unit-openai-runtime.mjs && node --import tsx test/unit-thinking.mjs && node --import tsx test/unit-converter-features.mjs && node --import tsx test/unit-truncation-recovery.mjs",
-
     "test:e2e": "node test/e2e-chat.mjs",
     "test:agentic": "node test/e2e-agentic.mjs"
   },
